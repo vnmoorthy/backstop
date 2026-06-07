@@ -140,6 +140,34 @@ async def _run_pipeline(appeal_id: str, denial: Denial) -> None:
             cd["claim"] = gw.redact_phi(cd.get("claim", ""))
             cd["evidence"] = gw.redact_phi(cd.get("evidence", ""))
             emit("reconcile.found", cd)
+
+            # REAL reasoning: compose the appeal argument with MiniMax, routed
+            # through the TrueFoundry gateway (PHI redacted on the way out +
+            # audited). This is a genuine LLM call when MINIMAX_API_KEY is set;
+            # it falls back to a grounded local line otherwise. Run off-thread so
+            # the blocking HTTP call never stalls the event loop.
+            mm = CLIENTS["minimax"]
+            reb = out.get("rebuttal")
+            prompt = gw.redact_phi(
+                f"You are a hospital appeals specialist on a call with {denial.payer}. "
+                f"Claim {denial.claim_id} was denied {denial.denial_code}. "
+                f'The payer rep asserted: "{contra.claim}". '
+                f'But the record shows: "{contra.evidence}". '
+                + (f'Winning precedent: "{reb.magic_words}". ' if reb else "")
+                + "In 2 crisp sentences, state the exact appeal argument that overturns this denial."
+            )
+            try:
+                argument = await asyncio.to_thread(mm.complete, prompt)
+            except Exception as _exc:  # never break the demo on a model hiccup
+                argument = ""
+            gw.audit({"kind": "reason.compose", "model": getattr(mm, "model", ""),
+                      "mode": getattr(mm, "mode", "sim"), "chars": len(argument or "")})
+            emit("agent.compose", {
+                "text": gw.redact_phi(argument or ""),
+                "mode": getattr(mm, "mode", "sim"),
+                "model": getattr(mm, "model", ""),
+            })
+
             letter = draft_appeal(
                 spec, contra, out["transcripts_by_agent"], out["rebuttal"], appeal_id=appeal_id
             )
