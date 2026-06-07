@@ -159,6 +159,24 @@
   }
   requestAnimationFrame(tick);
 
+  // Ambient pulse: a steady bubble from the PAVO core out to every one of the 23
+  // swarm agents, cycling through them — so the diagram visibly feeds all agents.
+  let _pulseIdx = 0;
+  function ambientPulse() {
+    const nodes = state.swarmNodes;
+    if (!nodes || !nodes.length || document.hidden) return;
+    const n = nodes[_pulseIdx % nodes.length];
+    _pulseIdx++;
+    const from = coreCenter();
+    particles.push({
+      fromX: from.x, fromY: from.y, toX: n.x, toY: n.y, x: from.x, y: from.y,
+      t: 0, speed: 0.044 + (_pulseIdx % 3) * 0.004,
+      color: (_pulseIdx % 7 === 0) ? "#818cf8" : "#00d49a",
+      size: 2.3,
+    });
+  }
+  setInterval(ambientPulse, 110);
+
   // ===================== cells =====================
   function relayoutCells() {
     const ids = Object.keys(state.cells);
