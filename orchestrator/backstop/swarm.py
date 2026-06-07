@@ -14,6 +14,7 @@ Public API:
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import date, timedelta
 
 from .call import run_call
@@ -106,8 +107,9 @@ async def run_swarm(spec: AppealSpec, router, moss, emit, gateway=None) -> dict:
     )
 
     gc = _GlobalCost()
-    lock = asyncio.Lock()  # protect the shared ledger + emit ordering across threads
-    loop = asyncio.get_running_loop()
+    # calls run on worker threads (asyncio.to_thread), so the shared ledger needs
+    # a threading lock to keep cost accounting + each snapshot consistent.
+    lock = threading.Lock()
 
     def make_emit(agent_id: str):
         # run_call calls this synchronously from a worker thread; marshal the
@@ -116,9 +118,11 @@ async def run_swarm(spec: AppealSpec, router, moss, emit, gateway=None) -> dict:
             if etype == "cost.tick":
                 return  # per-call ticks suppressed; the swarm emits the combined one
             if etype == "pavo.route":
-                gc.add(payload)
+                with lock:
+                    gc.add(payload)
+                    snap = gc.snapshot()
                 emit("pavo.route", payload)
-                emit("cost.tick", gc.snapshot())
+                emit("cost.tick", snap)
                 if payload.get("is_denial_reason"):
                     reb = moss.retrieve_rebuttal(denial.denial_code, denial.payer)
                     if reb:

@@ -93,7 +93,7 @@ async def _run_pipeline(appeal_id: str, denial: Denial) -> None:
         for name, mode in sponsor_modes(CLIENTS).items():
             emit("sponsor.mode", {"name": name, "mode": mode})
         spec = Concierge.intake(denial, parse_confidence=0.86)
-        emit("intake.parsed", spec.to_dict())
+        emit("intake.parsed", _redact_spec_for_wire(spec.to_dict(), gw))
         out = await run_swarm(spec, ROUTER, CLIENTS["moss"], emit, gateway=gw)
         contra = find_contradiction(out["transcripts_by_agent"])
         if contra:
@@ -108,6 +108,29 @@ async def _run_pipeline(appeal_id: str, denial: Denial) -> None:
     except Exception as exc:  # never leave the demo hanging silently
         APPEALS[appeal_id]["status"] = "error"
         emit("appeal.error", {"error": str(exc)})
+
+
+def _mask_tail(value: str, keep: int = 4) -> str:
+    s = str(value or "")
+    return ("*" * max(0, len(s) - keep)) + s[-keep:] if s else s
+
+
+def _redact_spec_for_wire(spec: dict, gateway) -> dict:
+    """Defense-in-depth: scrub PHI from the intake event before it hits the wire.
+
+    The dashboard never needs the member ID or full NPIs; we mask them (and run
+    raw_text through the TrueFoundry gateway's redactor) so PHI does not leave the
+    server even though the demo data is synthetic.
+    """
+    d = dict(spec.get("denial", {}))
+    d["member_id"] = _mask_tail(d.get("member_id", ""))
+    d["rendering_npi"] = _mask_tail(d.get("rendering_npi", ""))
+    d["billing_npi"] = _mask_tail(d.get("billing_npi", ""))
+    if d.get("raw_text"):
+        d["raw_text"] = gateway.redact_phi(d["raw_text"])
+    spec = dict(spec)
+    spec["denial"] = d
+    return spec
 
 
 def _denial_from_dict(d: dict) -> Denial:
