@@ -118,17 +118,19 @@ async def run_swarm(spec: AppealSpec, router, moss, emit, gateway=None) -> dict:
             if etype == "cost.tick":
                 return  # per-call ticks suppressed; the swarm emits the combined one
             if etype == "pavo.route":
+                # hold the lock across the whole per-route emission so the cost
+                # update, the route event, its cost.tick, the moss hit, and the
+                # audit stay atomic and in order across the concurrent calls.
                 with lock:
                     gc.add(payload)
-                    snap = gc.snapshot()
-                emit("pavo.route", payload)
-                emit("cost.tick", snap)
-                if payload.get("is_denial_reason"):
-                    reb = moss.retrieve_rebuttal(denial.denial_code, denial.payer)
-                    if reb:
-                        emit("moss.hit", {"agent_id": agent_id, **reb.to_dict()})
-                if gateway is not None:
-                    gateway.audit({"kind": "route", "agent": agent_id, "tier": payload.get("tier")})
+                    emit("pavo.route", payload)
+                    emit("cost.tick", gc.snapshot())
+                    if payload.get("is_denial_reason"):
+                        reb = moss.retrieve_rebuttal(denial.denial_code, denial.payer)
+                        if reb:
+                            emit("moss.hit", {"agent_id": agent_id, **reb.to_dict()})
+                    if gateway is not None:
+                        gateway.audit({"kind": "route", "agent": agent_id, "tier": payload.get("tier")})
                 return
             emit(etype, payload)
 

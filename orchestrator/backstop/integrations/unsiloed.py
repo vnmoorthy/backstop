@@ -21,10 +21,17 @@ class Unsiloed:
 
     def parse_eob(self, path_or_text: str) -> dict:
         """Return a dict of Denial fields parsed from an EOB. Accepts a file path or raw text."""
-        text = path_or_text
-        p = Path(path_or_text) if isinstance(path_or_text, str) and len(path_or_text) < 400 else None
-        if p is not None and p.exists():
-            text = p.read_text(encoding="utf-8", errors="ignore")
+        text = path_or_text or ""
+        # only treat the input as a file path if it is short, non-blank, and an
+        # actual file — Path("").exists() is True (resolves to "."), so a blank
+        # upload must NOT be read as a path (it raises IsADirectoryError).
+        if isinstance(text, str) and text.strip() and len(text) < 400:
+            try:
+                p = Path(text)
+                if p.is_file():
+                    text = p.read_text(encoding="utf-8", errors="ignore")
+            except (OSError, ValueError):
+                pass  # not a usable path — treat the string as the EOB text
 
         if self.mode == "real":
             try:
@@ -35,11 +42,18 @@ class Unsiloed:
 
     def _parse_regex(self, text: str) -> dict:
         def find(pat, default=""):
-            m = re.search(pat, text, re.IGNORECASE)
+            # MULTILINE so ^/$ anchors match per line (e.g. the payer-name line
+            # may not be the first characters when the EOB has a preamble header)
+            m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
             return m.group(1).strip() if m else default
 
         denial_code = find(r"\b(CO-\d{1,3}|PR-\d{1,3})\b", "CO-197").upper()
-        cpt = re.findall(r"\bCPT\s*[:#]?\s*(\d{5})\b", text, re.IGNORECASE) or re.findall(r"\b(\d{5})\b", text)
+        # only accept a 5-digit code that is actually labeled as a procedure code —
+        # never grab a bare 5-digit run (claim/member fragments are 5+ digits too)
+        cpt = (
+            re.findall(r"\bCPT\s*[:#]?\s*(\d{5})\b", text, re.IGNORECASE)
+            or re.findall(r"\b(?:HCPCS|procedure)\s*(?:code)?\s*[:#]?\s*(\d{5})\b", text, re.IGNORECASE)
+        )
         billed = find(r"\$([\d,]+\.\d{2})", "0.00").replace(",", "")
         npis = re.findall(r"\b(\d{10})\b", text)
         payer = find(r"^([A-Z][A-Za-z ]+?)\s+(?:EXPLANATION|EOB|provider)", "Aetna")

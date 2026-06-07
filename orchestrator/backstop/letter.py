@@ -8,6 +8,7 @@ swarm never files.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from .models import AppealLetter, AppealSpec, Contradiction, Rebuttal
@@ -24,6 +25,30 @@ def _body_md(spec: AppealSpec, contradiction: Contradiction, rebuttal: Rebuttal 
         if rebuttal
         else ""
     )
+    # the basis paragraph + requested action depend on the denial code
+    _BASIS = {
+        "CO-197": (
+            "no prior authorization was on file",
+            "The authorization exists and covers the date of service; the denial reflects a lookup performed against the billing NPI rather than the rendering NPI under which the authorization is filed.",
+            "The precertification on file satisfies the plan's authorization requirement.",
+        ),
+        "CO-16": (
+            "the claim was missing required information",
+            "The required information was present on the originally submitted claim and was dropped at the payer's intake, as documented in the call record above.",
+            "The claim contains all required elements and should be adjudicated on the merits.",
+        ),
+        "CO-50": (
+            "the service was not medically necessary",
+            "The clinical record documents that the plan's medical-necessity criteria were met, as confirmed on the call above.",
+            "The documented clinical criteria satisfy the plan's medical-necessity requirement.",
+        ),
+    }
+    _generic = (
+        "the stated denial reason does not hold",
+        "The payer's own record, quoted above, contradicts the stated basis for the denial.",
+        "The claim should be reprocessed and paid on the merits.",
+    )
+    _basis0, _basis1, _basis2 = _BASIS.get((d.denial_code or "").upper(), _generic)
     return f"""# Appeal of Claim Denial — {d.denial_code}
 
 **Payer:** {d.payer}  ·  **Plan:** {d.plan}  ·  **State:** {d.state}
@@ -33,9 +58,8 @@ def _body_md(spec: AppealSpec, contradiction: Contradiction, rebuttal: Rebuttal 
 
 ## Basis for appeal
 
-This claim was denied **{d.denial_code}** on the stated basis that no prior
-authorization was on file. The record obtained on the payer's own provider line
-contradicts that basis.
+This claim was denied **{d.denial_code}** on the stated basis that {_basis0}. The
+record obtained on the payer's own provider line contradicts that basis.
 
 **Provider-services representative stated (verbatim, turn {contradiction.rep_turn_id}):**
 > "{contradiction.claim}"
@@ -43,14 +67,11 @@ contradicts that basis.
 **However, the payer's own records confirm (verbatim, turn {contradiction.evidence_turn_id}):**
 > "{contradiction.evidence}"
 
-The authorization exists and covers the date of service. The denial reflects a
-lookup performed against the billing NPI rather than the rendering NPI under which
-the authorization is filed. {rb_line}
+{_basis1} {rb_line}
 
 ## Requested action
 
-Reprocess and pay claim {d.claim_id} for date of service {d.date_of_service}. The
-precertification on file satisfies the plan's authorization requirement.
+Reprocess and pay claim {d.claim_id} for date of service {d.date_of_service}. {_basis2}
 
 ---
 *Prepared by Backstop from the verbatim call record. Requires licensed appeals-nurse
@@ -69,8 +90,11 @@ def _render_pdf(body_md: str, out_path: Path) -> bool:
         return False
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # render to a unique temp file then atomically replace, so a /files reader
+    # can never be served a half-written PDF mid-build
+    tmp_path = out_path.with_name(out_path.stem + f".{os.getpid()}.tmp.pdf")
     styles = getSampleStyleSheet()
-    doc = SimpleDocTemplate(str(out_path), pagesize=LETTER, topMargin=0.8 * inch, bottomMargin=0.8 * inch)
+    doc = SimpleDocTemplate(str(tmp_path), pagesize=LETTER, topMargin=0.8 * inch, bottomMargin=0.8 * inch)
     flow = []
     for raw in body_md.splitlines():
         line = raw.rstrip()
@@ -87,6 +111,7 @@ def _render_pdf(body_md: str, out_path: Path) -> bool:
             safe = line.replace("**", "")
             flow.append(Paragraph(safe, styles["BodyText"]))
     doc.build(flow)
+    os.replace(tmp_path, out_path)  # atomic
     return out_path.exists()
 
 
@@ -95,10 +120,14 @@ def draft_appeal(
     contradiction: Contradiction,
     transcripts_by_agent: dict | None = None,
     rebuttal: Rebuttal | None = None,
+    appeal_id: str | None = None,
 ) -> AppealLetter:
     body = _body_md(spec, contradiction, rebuttal)
-    appeal_id = f"AP-{spec.denial.claim_id}"
-    out_path = _OUT / f"appeal_{spec.denial.claim_id}.pdf"
+    # key the PDF on the unique server appeal_id so concurrent appeals (even with
+    # the same claim_id) never collide; fall back to claim_id for direct callers
+    appeal_id = appeal_id or f"AP-{spec.denial.claim_id}"
+    safe_id = "".join(ch for ch in appeal_id if ch.isalnum() or ch in "-_")
+    out_path = _OUT / f"appeal_{safe_id}.pdf"
     rendered = _render_pdf(body, out_path)
     citations = ([rebuttal.source_id] if rebuttal else []) + ["call-record"]
     return AppealLetter(

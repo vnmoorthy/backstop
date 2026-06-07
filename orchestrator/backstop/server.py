@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -63,6 +64,7 @@ APPEALS: dict[str, dict] = {}  # appeal_id -> {events:[...], status}
 class ConnectionManager:
     def __init__(self):
         self.active: set[WebSocket] = set()
+        self._send_lock = asyncio.Lock()  # serialize broadcasts; worker threads schedule many
 
     async def connect(self, ws: WebSocket):
         await ws.accept()
@@ -72,11 +74,15 @@ class ConnectionManager:
         self.active.discard(ws)
 
     async def broadcast(self, message: dict):
-        for ws in list(self.active):
-            try:
-                await ws.send_json(message)
-            except Exception:
-                self.disconnect(ws)
+        # many swarm worker threads schedule broadcasts via run_coroutine_threadsafe;
+        # without this lock two coroutines could interleave at `await ws.send_json`
+        # on the same socket and corrupt frames.
+        async with self._send_lock:
+            for ws in list(self.active):
+                try:
+                    await ws.send_json(message)
+                except Exception:
+                    self.disconnect(ws)
 
 
 manager = ConnectionManager()
@@ -96,19 +102,23 @@ async def _no_cache(request, call_next):
 
 def _make_emit(appeal_id: str, loop: asyncio.AbstractEventLoop):
     seq = {"n": 0}
+    lock = threading.Lock()  # emit is called concurrently from swarm worker threads
 
     def emit(etype: str, payload: dict) -> None:
-        seq["n"] += 1
-        event = {
-            "type": etype,
-            "appeal_id": appeal_id,
-            "ts": round(time.time(), 3),
-            "seq": seq["n"],
-            **payload,
-        }
-        APPEALS[appeal_id]["events"].append(event)
-        # marshal the broadcast onto the event loop (emit is called from worker threads)
-        asyncio.run_coroutine_threadsafe(manager.broadcast(event), loop)
+        # build the event + assign the seq + append under the lock so the seq is
+        # never lost to a read-modify-write race and the broadcast order matches
+        # the append order.
+        with lock:
+            seq["n"] += 1
+            event = {
+                "type": etype,
+                "appeal_id": appeal_id,
+                "ts": round(time.time(), 3),
+                "seq": seq["n"],
+                **payload,
+            }
+            APPEALS[appeal_id]["events"].append(event)
+            asyncio.run_coroutine_threadsafe(manager.broadcast(event), loop)
 
     return emit
 
@@ -125,8 +135,14 @@ async def _run_pipeline(appeal_id: str, denial: Denial) -> None:
         out = await run_swarm(spec, ROUTER, CLIENTS["moss"], emit, gateway=gw)
         contra = find_contradiction(out["transcripts_by_agent"])
         if contra:
-            emit("reconcile.found", contra.to_dict())
-            letter = draft_appeal(spec, contra, out["transcripts_by_agent"], out["rebuttal"])
+            # redact the verbatim quotes before they hit the wire (defense-in-depth)
+            cd = contra.to_dict()
+            cd["claim"] = gw.redact_phi(cd.get("claim", ""))
+            cd["evidence"] = gw.redact_phi(cd.get("evidence", ""))
+            emit("reconcile.found", cd)
+            letter = draft_appeal(
+                spec, contra, out["transcripts_by_agent"], out["rebuttal"], appeal_id=appeal_id
+            )
             pdf_name = Path(letter.pdf_path).name if letter.pdf_path else ""
             d = letter.to_dict()
             d["pdf_url"] = f"/files/{pdf_name}" if pdf_name else ""
@@ -140,7 +156,12 @@ async def _run_pipeline(appeal_id: str, denial: Denial) -> None:
 
 def _mask_tail(value: str, keep: int = 4) -> str:
     s = str(value or "")
-    return ("*" * max(0, len(s) - keep)) + s[-keep:] if s else s
+    if not s:
+        return s
+    # never reveal more than half (and never the whole) of a short identifier —
+    # the old `s[-keep:]` returned the full string when len(s) <= keep.
+    show = min(keep, len(s) // 2)
+    return "*" * (len(s) - show) + s[len(s) - show:]
 
 
 def _redact_spec_for_wire(spec: dict, gateway) -> dict:
