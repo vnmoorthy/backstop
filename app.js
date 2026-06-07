@@ -9,6 +9,23 @@
   const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://") +
     (location.host || "localhost:8000") + "/stream";
 
+  // Static-host detection: on GitHub Pages there is no backend, so skip the
+  // /samples fetch + WebSocket entirely and let the Run button play the replay.
+  const STATIC = /github\.io$/.test(location.hostname);
+
+  // Honor reduced-motion: gate the ambient pulse interval entirely.
+  const REDUCED_MOTION = window.matchMedia &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // Lightweight error sink so QA can assert a clean console.
+  window.__errs = window.__errs || [];
+  window.addEventListener("error", (e) => { window.__errs.push(String((e && e.message) || e)); });
+  window.addEventListener("unhandledrejection", (e) => { window.__errs.push(String((e && e.reason) || e)); });
+
+  // rAF gating: the canvas loop only runs when the tab is visible, the stage is
+  // on-screen, and there is something to draw — otherwise it idles (saves battery).
+  let rafId = null, vis = !document.hidden, onScreen = true;
+
   // ---- element refs ----
   const $ = (id) => document.getElementById(id);
   const els = {
@@ -75,6 +92,7 @@
       color: TIER_COLOR[tier] || TIER_COLOR.local_fast,
       size: tier === "frontier" ? 3.2 : 2.4,
     });
+    startLoop();
   }
 
   // Draw the swarm as a topology: thin connector lines from the PAVO core to
@@ -101,7 +119,7 @@
     const PC = { Intake: "#818cf8", Triage: "#00d49a", Prep: "#00d49a", Call: "#fbbf24",
       Reason: "#818cf8", Draft: "#00d49a", File: "#8a8a93", Recover: "#00d49a", Learn: "#818cf8" };
     const rings = [WORKFORCE.slice(0, 8), WORKFORCE.slice(8)];
-    const rad = [Math.min(W * 0.17, 150), Math.min(W * 0.42, 385)];
+    const rad = [Math.min(W * 0.17, 150), Math.min(W * 0.40, 360)];
     const ryf = [0.96, 0.82];
     rings.forEach((list, ri) => {
       list.forEach((a, i) => {
@@ -127,6 +145,8 @@
     state.swarmNodes.forEach((n) => { ctx.beginPath(); ctx.moveTo(c.x, c.y); ctx.lineTo(n.x, n.y); ctx.stroke(); });
   }
 
+  function startLoop() { if (!rafId && vis && onScreen) rafId = requestAnimationFrame(tick); }
+
   function tick() {
     ctx.clearRect(0, 0, W, H);
     drawSwarmConnectors();
@@ -149,7 +169,8 @@
       ctx.shadowBlur = 0;
       if (p.t >= 1) { burst(p); particles.splice(i, 1); }
     }
-    requestAnimationFrame(tick);
+    if ((particles.length || state.running) && vis && onScreen) { rafId = requestAnimationFrame(tick); }
+    else { rafId = null; }
   }
   function burst(p) {
     // a quiet ring on arrival, not a flare
@@ -157,7 +178,16 @@
     ctx.beginPath(); ctx.arc(p.toX, p.toY, p.size * 2.2, 0, Math.PI * 2); ctx.stroke();
     ctx.restore();
   }
-  requestAnimationFrame(tick);
+  startLoop();
+
+  // Pause/resume the loop with tab visibility and stage on-screen state.
+  document.addEventListener("visibilitychange", () => { vis = !document.hidden; if (vis) startLoop(); });
+  if ("IntersectionObserver" in window && els.stage) {
+    new IntersectionObserver((entries) => {
+      onScreen = entries.some((en) => en.isIntersecting);
+      if (onScreen) startLoop();
+    }, { threshold: 0 }).observe(els.stage);
+  }
 
   // Ambient pulse: a steady bubble from the PAVO core out to every one of the 23
   // swarm agents, cycling through them — so the diagram visibly feeds all agents.
@@ -174,24 +204,27 @@
       color: (_pulseIdx % 7 === 0) ? "#818cf8" : "#00d49a",
       size: 2.3,
     });
+    startLoop();
   }
-  setInterval(ambientPulse, 110);
+  if (!REDUCED_MOTION) setInterval(ambientPulse, 110);
 
   // ===================== cells =====================
   function relayoutCells() {
     const ids = Object.keys(state.cells);
     const n = ids.length; if (!n) return;
     const cx0 = W / 2, cy0 = H / 2;
-    // elliptical burst: use the stage's full width horizontally so cells fan out
-    // into a clean triangle/ring around the singularity instead of clustering.
-    const rx = Math.min(W * 0.36, 340);
-    const ry = H * 0.34;
-    const start = -Math.PI / 2 + (n === 2 ? Math.PI / 6 : 0); // top, then even
+    // Tighter elliptical ring so the 3 active cells sit inside the 23-node
+    // constellation without colliding with the outer ring of agent chips.
+    const rx = Math.min(W * 0.30, 250);
+    const ry = H * 0.26;
+    const start = -Math.PI / 2 + Math.PI / 3; // rotate the trio off the outer-ring spokes
     ids.forEach((id, i) => {
       const ang = start + (i / n) * Math.PI * 2;
-      const cx = Math.max(120, Math.min(W - 120, cx0 + Math.cos(ang) * rx));
-      const cy = Math.max(70, Math.min(H - 70, cy0 + Math.sin(ang) * ry));
       const cell = state.cells[id];
+      // clamp from the cell's real half-width so it never spills off-screen on mobile
+      const halfW = (cell.el && cell.el.offsetWidth ? cell.el.offsetWidth : 210) / 2 + 6;
+      const cx = Math.max(halfW, Math.min(W - halfW, cx0 + Math.cos(ang) * rx));
+      const cy = Math.max(70, Math.min(H - 70, cy0 + Math.sin(ang) * ry));
       cell.center = { x: cx, y: cy };
       cell.el.style.left = cx + "px";
       cell.el.style.top = cy + "px";
@@ -398,10 +431,10 @@
     const body = document.getElementById("workforce-body");
     if (!body) return;
     body.innerHTML =
-      '<div style="display:flex;flex-wrap:wrap;gap:10px">' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px">' +
       WF_PHASES.map((ph) => {
         const ags = WORKFORCE.filter((a) => a.p === ph);
-        return '<div style="flex:1;min-width:158px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);padding:11px 12px">' +
+        return '<div style="border:1px solid var(--border);border-radius:10px;background:var(--surface-2);padding:11px 12px">' +
           '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-faint);font-weight:700;margin-bottom:9px">' + ph + '</div>' +
           ags.map((a) =>
             '<div style="display:flex;align-items:center;gap:7px;padding:3px 0">' +
@@ -444,11 +477,15 @@
   }
   function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
-  let ws;
+  let ws, wsTries = 0;
   function connect() {
     try { ws = new WebSocket(WS_URL); } catch (_) { setConn(false); return; }
-    ws.onopen = () => { setConn(true); };
-    ws.onclose = () => { setConn(false); setTimeout(connect, 1500); };
+    ws.onopen = () => { setConn(true); wsTries = 0; };
+    ws.onclose = () => {
+      setConn(false);
+      // capped exponential backoff; never reconnect on a static host (no backend).
+      if (!STATIC && wsTries < 6) setTimeout(connect, Math.min(1500 * 2 ** wsTries++, 30000));
+    };
     ws.onerror = () => { try { ws.close(); } catch (_) {} };
     ws.onmessage = (m) => { try { dispatch(JSON.parse(m.data)); } catch (_) {} };
   }
@@ -490,14 +527,21 @@
       i++;
     });
     seq.push([260 + i * 70 + 200, { type: "reconcile.found", claim: "there is no prior authorization on file", evidence: "authorization A4471 was issued for that date of service", rep_turn_id: 10, evidence_turn_id: 3 }]);
+    seq.push([260 + i * 70 + 350, { type: "agent.compose", mode: "real", model: "MiniMax-Text-01", text: "The claim was denied CO-197 in error: authorization A4471 was on file for the date of service, confirmed by the records desk — reprocess and pay." }]);
     seq.push([260 + i * 70 + 500, { type: "letter.ready", appeal_id: A, citations: ["RB-AETNA-CO197", "call-record"], pdf_url: "" }]);
     seq.push([260 + i * 70 + 700, { type: "appeal.done", cost: {} }]);
     seq.forEach(([delay, ev]) => setTimeout(() => dispatch({ appeal_id: A, ...ev }), delay));
   }
 
   // boot
-  loadSamples();
   renderWorkforce();
   resize();
-  connect();
+  if (!STATIC) {
+    loadSamples();
+    connect();
+  } else {
+    // Static host (GitHub Pages): no backend — show a default option, mark offline.
+    els.picker.innerHTML = '<option value="">Aetna · CO-197 (default)</option>';
+    setConn(false);
+  }
 })();
