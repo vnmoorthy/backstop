@@ -1,0 +1,194 @@
+{
+  "schema_version": "1.0",
+  "description": "Backstop CARC/RARC denial lexicon. Maps each Claim Adjustment Reason Code (CARC, 'CO-'/'PR-' prefixed) and Remittance Advice Remark Code (RARC, 'N'/'M' prefixed) to a normalized category, a payer-neutral canonical reason, and the default disposition the routing policy selects when no claim-specific override applies. default_route is one of RESUBMIT, APPEAL, PEER_TO_PEER, WRITE_OFF and mirrors backstop.domain.enums.RouteDecision.",
+  "codes": {
+    "CO-197": {
+      "category": "PRIOR_AUTHORIZATION",
+      "canonical_reason": "Precertification/authorization/notification absent.",
+      "default_route": "APPEAL",
+      "rebuttal_template": "Prior authorization was obtained under reference {auth_ref}; the precertification was on file before the date of service {dos}. We request reprocessing of claim {claim_id} on the authorized authorization.",
+      "keywords": [
+        "prior authorization",
+        "precertification",
+        "precert",
+        "authorization not obtained",
+        "no authorization",
+        "auth missing",
+        "preauthorization",
+        "notification absent"
+      ]
+    },
+    "CO-198": {
+      "category": "PRIOR_AUTHORIZATION",
+      "canonical_reason": "Precertification/notification absent for the level of care billed.",
+      "default_route": "APPEAL",
+      "rebuttal_template": "The authorized level of care for {claim_id} matches the rendered service; precertification {auth_ref} covers the billed level of care.",
+      "keywords": [
+        "precertification level of care",
+        "notification absent",
+        "level of care authorization"
+      ]
+    },
+    "CO-16": {
+      "category": "MISSING_INFORMATION",
+      "canonical_reason": "Claim/service lacks information or has submission/billing errors.",
+      "default_route": "RESUBMIT",
+      "rebuttal_template": "The missing element flagged by remark {rarc} is supplied here: {missing_field}. We resubmit corrected claim {claim_id} with the required information.",
+      "keywords": [
+        "lacks information",
+        "missing information",
+        "submission error",
+        "billing error",
+        "incomplete claim",
+        "additional information required"
+      ]
+    },
+    "CO-50": {
+      "category": "MEDICAL_NECESSITY",
+      "canonical_reason": "Non-covered service deemed not medically necessary by the payer.",
+      "default_route": "PEER_TO_PEER",
+      "rebuttal_template": "The service on {claim_id} is medically necessary: the documented diagnosis {dx} and clinical findings meet the payer's own medical-policy criteria. We request a peer-to-peer review with the rendering physician.",
+      "keywords": [
+        "not medically necessary",
+        "medical necessity",
+        "not deemed a medical necessity",
+        "lack of medical necessity",
+        "medically necessary",
+        "non-covered medical necessity"
+      ]
+    },
+    "CO-55": {
+      "category": "MEDICAL_NECESSITY",
+      "canonical_reason": "Procedure/treatment deemed experimental or investigational by the payer.",
+      "default_route": "PEER_TO_PEER",
+      "rebuttal_template": "The procedure on {claim_id} is established standard of care, not experimental; peer-reviewed literature and the payer medical policy support coverage. We request a peer-to-peer review.",
+      "keywords": [
+        "experimental",
+        "investigational",
+        "experimental procedure",
+        "investigational treatment"
+      ]
+    },
+    "CO-45": {
+      "category": "FEE_SCHEDULE",
+      "canonical_reason": "Charge exceeds fee schedule/maximum allowable or contracted amount.",
+      "default_route": "WRITE_OFF",
+      "rebuttal_template": "The amount above the contracted allowable on {claim_id} is a provider write-off per the participating agreement; no member balance applies.",
+      "keywords": [
+        "exceeds fee schedule",
+        "maximum allowable",
+        "contracted amount",
+        "fee schedule adjustment",
+        "exceeds allowable"
+      ]
+    },
+    "CO-11": {
+      "category": "CODING",
+      "canonical_reason": "Diagnosis inconsistent with the procedure code billed.",
+      "default_route": "RESUBMIT",
+      "rebuttal_template": "The diagnosis-to-procedure linkage on {claim_id} is corrected: diagnosis {dx} supports procedure {cpt}. We resubmit the corrected claim.",
+      "keywords": [
+        "diagnosis inconsistent",
+        "inconsistent with the procedure",
+        "diagnosis procedure mismatch",
+        "coding error",
+        "diagnosis code"
+      ]
+    },
+    "CO-4": {
+      "category": "CODING",
+      "canonical_reason": "Procedure code inconsistent with the modifier or a required modifier is missing.",
+      "default_route": "RESUBMIT",
+      "rebuttal_template": "The required modifier for procedure {cpt} on {claim_id} is appended; we resubmit the corrected claim with the appropriate modifier.",
+      "keywords": [
+        "modifier missing",
+        "inconsistent modifier",
+        "required modifier",
+        "procedure modifier"
+      ]
+    },
+    "CO-18": {
+      "category": "DUPLICATE",
+      "canonical_reason": "Exact duplicate claim or service.",
+      "default_route": "WRITE_OFF",
+      "rebuttal_template": "Claim {claim_id} is not a duplicate; it is a distinct date of service {dos}. If genuinely duplicate, no balance is pursued.",
+      "keywords": [
+        "duplicate claim",
+        "exact duplicate",
+        "duplicate service"
+      ]
+    },
+    "CO-29": {
+      "category": "TIMELY_FILING",
+      "canonical_reason": "Time limit for filing the claim has expired.",
+      "default_route": "APPEAL",
+      "rebuttal_template": "Claim {claim_id} was filed within the timely-filing window; proof of timely submission {proof_ref} is attached. We appeal the timely-filing denial.",
+      "keywords": [
+        "timely filing",
+        "time limit for filing",
+        "filing limit expired",
+        "filing deadline"
+      ]
+    },
+    "PR-1": {
+      "category": "PATIENT_RESPONSIBILITY",
+      "canonical_reason": "Deductible amount is patient responsibility.",
+      "default_route": "WRITE_OFF",
+      "rebuttal_template": "The deductible on {claim_id} is correctly applied as patient responsibility; this is billed to the member, not appealed to the payer.",
+      "keywords": [
+        "deductible",
+        "patient responsibility deductible",
+        "deductible amount"
+      ]
+    },
+    "PR-204": {
+      "category": "BENEFIT_PROVISION",
+      "canonical_reason": "Service/equipment/drug is not covered under the patient's current benefit plan.",
+      "default_route": "APPEAL",
+      "rebuttal_template": "The plan documents for {claim_id} list this service as a covered benefit on the effective plan; we appeal with the benefit-summary citation.",
+      "keywords": [
+        "not covered under the patient",
+        "benefit plan",
+        "not a covered benefit",
+        "plan does not cover"
+      ]
+    },
+    "N130": {
+      "category": "PLAN_PROVISION",
+      "canonical_reason": "Consult plan benefit documents/guidelines for information about restrictions for this service.",
+      "default_route": "APPEAL",
+      "rebuttal_template": "The plan benefit documents for {claim_id} contain no restriction excluding this service; the cited plan provision supports coverage. We appeal with the plan-document excerpt.",
+      "keywords": [
+        "plan benefit documents",
+        "plan provision",
+        "benefit guidelines",
+        "restrictions for this service",
+        "consult plan",
+        "plan restriction"
+      ]
+    },
+    "N115": {
+      "category": "MEDICAL_NECESSITY",
+      "canonical_reason": "Decision based on a Local Coverage Determination (LCD) for medical necessity.",
+      "default_route": "PEER_TO_PEER",
+      "rebuttal_template": "The service on {claim_id} satisfies the cited LCD criteria; documentation supports each required element. We request a peer-to-peer review.",
+      "keywords": [
+        "local coverage determination",
+        "lcd",
+        "coverage determination medical necessity"
+      ]
+    },
+    "M127": {
+      "category": "MISSING_INFORMATION",
+      "canonical_reason": "Missing patient medical record for this service.",
+      "default_route": "RESUBMIT",
+      "rebuttal_template": "The requested medical records for {claim_id} are attached; we resubmit with the supporting documentation for date of service {dos}.",
+      "keywords": [
+        "missing medical record",
+        "medical record for this service",
+        "records request",
+        "supporting documentation missing"
+      ]
+    }
+  }
+}

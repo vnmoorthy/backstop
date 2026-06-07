@@ -1,0 +1,87 @@
+{
+  "1": {
+    "category": "patient_responsibility",
+    "canonical_reason": "Deductible amount.",
+    "default_route": "WRITE_OFF"
+  },
+  "2": {
+    "category": "patient_responsibility",
+    "canonical_reason": "Coinsurance amount.",
+    "default_route": "WRITE_OFF"
+  },
+  "3": {
+    "category": "patient_responsibility",
+    "canonical_reason": "Co-payment amount.",
+    "default_route": "WRITE_OFF"
+  },
+  "4": {
+    "category": "coding",
+    "canonical_reason": "The procedure code is inconsistent with the modifier used.",
+    "default_route": "RESUBMIT"
+  },
+  "11": {
+    "category": "coding",
+    "canonical_reason": "The diagnosis is inconsistent with the procedure.",
+    "default_route": "RESUBMIT"
+  },
+  "16": {
+    "category": "missing_information",
+    "canonical_reason": "Claim/service lacks information or has submission/billing error(s).",
+    "default_route": "RESUBMIT"
+  },
+  "18": {
+    "category": "duplicate",
+    "canonical_reason": "Exact duplicate claim/service.",
+    "default_route": "WRITE_OFF"
+  },
+  "22": {
+    "category": "coordination_of_benefits",
+    "canonical_reason": "This care may be covered by another payer per coordination of benefits.",
+    "default_route": "RESUBMIT"
+  },
+  "29": {
+    "category": "timely_filing",
+    "canonical_reason": "The time limit for filing has expired.",
+    "default_route": "APPEAL"
+  },
+  "45": {
+    "category": "contractual",
+    "canonical_reason": "Charge exceeds fee schedule/maximum allowable amount.",
+    "default_route": "WRITE_OFF"
+  },
+  "50": {
+    "category": "medical_necessity",
+    "canonical_reason": "These are non-covered services because this is not deemed a medical necessity by the payer.",
+    "default_route": "APPEAL"
+  },
+  "96": {
+    "category": "non_covered",
+    "canonical_reason": "Non-covered charge(s).",
+    "default_route": "APPEAL"
+  },
+  "97": {
+    "category": "bundling",
+    "canonical_reason": "The benefit for this service is included in the payment/allowance for another service already adjudicated.",
+    "default_route": "APPEAL"
+  },
+  "109": {
+    "category": "coverage",
+    "canonical_reason": "Claim/service not covered by this payer/contractor.",
+    "default_route": "RESUBMIT"
+  },
+  "151": {
+    "category": "medical_necessity",
+    "canonical_reason": "Payment adjusted because the payer deems the information submitted does not support this many/frequency of services.",
+    "default_route": "APPEAL"
+  },
+  "197": {
+    "category": "authorization",
+    "canonical_reason": "Precertification/authorization/notification/pre-treatment absent.",
+    "default_route": "APPEAL"
+  },
+  "204": {
+    "category": "coverage",
+    "canonical_reason": "This service/equipment/drug is not covered under the patient's current benefit plan.",
+    "default_route": "APPEAL"
+  }
+}
