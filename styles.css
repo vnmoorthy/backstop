@@ -54,7 +54,7 @@ body { min-height: 100vh; }
   display: inline-flex; align-items: center; gap: 8px;
   font-weight: 700; font-size: 13px; color: var(--ink);
   background: linear-gradient(135deg, var(--mint), #7af0d0);
-  padding: 9px 16px; border-radius: 10px; border: none; cursor: pointer;
+  padding: 12px 18px; border-radius: 10px; border: none; cursor: pointer; min-height: 44px;
   box-shadow: 0 6px 20px rgba(62,242,196,0.30); transition: transform .1s, box-shadow .2s;
 }
 .run-btn:hover { transform: translateY(-1px); box-shadow: 0 8px 26px rgba(62,242,196,0.45); }
@@ -119,8 +119,8 @@ body { min-height: 100vh; }
 .letter-body { font-size: 12.5px; }
 .letter-meta { font-family: "JetBrains Mono", monospace; color: var(--muted); font-size: 11px; margin-bottom: 10px; }
 .letter-actions { display: flex; gap: 8px; margin-top: 10px; }
-.btn-link { font-size: 12px; color: var(--cobalt); text-decoration: none; border: 1px solid var(--edge); padding: 7px 11px; border-radius: 8px; }
-.btn-sign { font-size: 12px; font-weight: 700; color: var(--ink); background: var(--amber); border: none; padding: 7px 13px; border-radius: 8px; cursor: pointer; }
+.btn-link { font-size: 12px; color: var(--cobalt); text-decoration: none; border: 1px solid var(--edge); padding: 11px 15px; border-radius: 8px; display: inline-flex; align-items: center; min-height: 44px; }
+.btn-sign { font-size: 12px; font-weight: 700; color: var(--ink); background: var(--amber); border: none; padding: 11px 17px; border-radius: 8px; cursor: pointer; min-height: 44px; }
 .btn-sign.signed { background: var(--mint); }
 
 /* ---- the swarm stage ---- */
@@ -188,7 +188,7 @@ body { min-height: 100vh; }
 /* ---- denial picker ---- */
 .picker {
   font-size: 12px; color: #cfd8ea; background: rgba(11,15,26,0.8);
-  border: 1px solid var(--edge); border-radius: 9px; padding: 8px 10px;
+  border: 1px solid var(--edge); border-radius: 9px; padding: 11px 12px; min-height: 44px;
   font-family: "JetBrains Mono", monospace; max-width: 230px; cursor: pointer;
 }
 .picker:focus { outline: none; border-color: rgba(62,242,196,0.4); }
