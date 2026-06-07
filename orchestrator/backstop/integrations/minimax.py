@@ -16,7 +16,7 @@ class MiniMax:
         self.api_key = os.getenv("MINIMAX_API_KEY")
         self.group_id = os.getenv("MINIMAX_GROUP_ID")
         self.base_url = os.getenv("MINIMAX_BASE_URL", "https://api.minimax.io/v1")
-        self.model = os.getenv("MINIMAX_MODEL", "abab6.5s-chat")
+        self.model = os.getenv("MINIMAX_MODEL", "MiniMax-Text-01")
         self.mode = "real" if self.api_key else "sim"
 
     def complete(self, prompt: str, lang: str = "en") -> str:
