@@ -1,0 +1,15 @@
+{
+  "denial_id": "DEN-2026-0001",
+  "payer": "Aetna",
+  "plan": "Aetna Choice POS II",
+  "state": "TX",
+  "denial_code": "CO-197",
+  "cpt": ["99285"],
+  "billed_amount": 2480.00,
+  "date_of_service": "2026-03-14",
+  "member_id": "W812340099",
+  "claim_id": "CLM-55-7741",
+  "rendering_npi": "1659302341",
+  "billing_npi": "1093847551",
+  "raw_text": "AETNA EXPLANATION OF BENEFITS\nClaim CLM-55-7741  DOS 03/14/2026  CPT 99285  Billed $2,480.00\nDENIAL CO-197: Precertification/authorization absent.\nMember W812340099  Plan: Aetna Choice POS II (TX)\nAppeal rights: written reconsideration within 180 days of this notice."
+}

@@ -1,0 +1,15 @@
+{
+  "denial_id": "DEN-2026-0002",
+  "payer": "UnitedHealthcare",
+  "plan": "UnitedHealthcare Choice Plus",
+  "state": "IL",
+  "denial_code": "CO-16",
+  "cpt": ["93000", "93010"],
+  "billed_amount": 410.00,
+  "date_of_service": "2026-02-02",
+  "member_id": "U559120048",
+  "claim_id": "CLM-91-2200",
+  "rendering_npi": "1487223390",
+  "billing_npi": "1730558821",
+  "raw_text": "UNITEDHEALTHCARE EXPLANATION OF BENEFITS\nClaim CLM-91-2200  DOS 02/02/2026  CPT 93000, 93010  Billed $410.00\nDENIAL CO-16: Claim/service lacks information or has submission/billing error(s).\nRemark N822: Missing/incomplete/invalid rendering provider information.\nMember U559120048  Plan: UnitedHealthcare Choice Plus (IL)\nAppeal rights: written reconsideration within 180 days of this notice."
+}
