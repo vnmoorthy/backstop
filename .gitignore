@@ -18,3 +18,10 @@ web/.next/
 data/out/
 *.log
 .gstack/
+.hypothesis/
+orchestrator/artifacts/
+orchestrator/backstop.db
+orchestrator/backstop.db-*
+*.db
+*.db-shm
+*.db-wal
