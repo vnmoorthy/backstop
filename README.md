@@ -4,9 +4,11 @@
 
 ### The AI agent swarm that recovers denied insurance claims — and bills only on what it recovers.
 
-**[🔴 Live demo → vnmoorthy.github.io/backstop](https://vnmoorthy.github.io/backstop/)**
+**[🔴 Live demo](https://vnmoorthy.github.io/backstop/)**  ·  **[📄 PAVO paper — TMLR 2026](https://openreview.net/forum?id=zrneoIxlFx&noteId=OBmEIQrEuO)**  ·  **[🤗 pavo-bench dataset](https://huggingface.co/datasets/vnmoorthy/pavo-bench)**
 
 *A 23-agent voice swarm that verifies coverage, finds the authorization, calls the payer, wins the appeal, drafts the nurse-signed letter, files it, and tracks the recovery — paid 25–30% of recovered dollars. Zero risk to the hospital.*
+
+> **Built on [PAVO](https://openreview.net/forum?id=zrneoIxlFx&noteId=OBmEIQrEuO)** — a masked router (TMLR 2026) that collapses per-task model cost ~4–6×. Benchmark: [`huggingface.co/datasets/vnmoorthy/pavo-bench`](https://huggingface.co/datasets/vnmoorthy/pavo-bench).
 
 </div>
 
