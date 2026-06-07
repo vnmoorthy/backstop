@@ -1,210 +1,170 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>BACKSTOP — Claim Recovery Swarm</title>
-
-  <!--
-    BACKSTOP dashboard. Single page, NO build step.
-    Tailwind via CDN for layout utilities; styles.css for the bespoke,
-    demo-grade visuals (glow, particles, the cost ticker, magenta flares).
-    app.js owns all state + the WS event handling (with a canned replay
-    fallback so the demo survives a dead socket).
-  -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    // Extend Tailwind's dark palette with the Backstop brand tokens so we can
-    // use them as utility classes alongside the hand-written CSS.
-    tailwind.config = {
-      darkMode: "class",
-      theme: {
-        extend: {
-          colors: {
-            ink:    "#05070d",   // page base
-            panel:  "#0b0f1a",   // card base
-            edge:   "#1b2233",   // hairline borders
-            mint:   "#3ef2c4",   // local_fast / mid PAVO particles
-            magenta:"#ff2d9b",   // frontier flares (the hero)
-            cobalt: "#5b8cff",   // accents
-            amber:  "#ffb13b",   // warnings / nurse
-          },
-          fontFamily: {
-            mono: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
-          },
-        },
-      },
-    };
-  </script>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link
-    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
-    rel="stylesheet"
-  />
+  <title>Backstop — Denied-Claim Recovery</title>
+  <!-- No CDN: self-contained design system in styles.css, system font stack. -->
   <link rel="stylesheet" href="styles.css" />
 </head>
 
-<body class="bg-ink text-slate-200 font-[Inter] antialiased overflow-x-hidden">
-
-  <!-- Ambient backdrop: a faint grid + radial glow behind everything. -->
-  <div class="bg-grid" aria-hidden="true"></div>
+<body>
   <div class="bg-glow" aria-hidden="true"></div>
 
-  <div class="relative z-10 max-w-[1500px] mx-auto px-6 py-5">
+  <div class="app">
 
-    <!-- ============================ HEADER ============================ -->
-    <header class="flex items-center justify-between mb-5">
-      <div class="flex items-center gap-3">
-        <div class="brand-mark"><span></span></div>
+    <!-- ============================ TOP BAR ============================ -->
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-logo" aria-hidden="true"></div>
         <div>
-          <h1 class="text-xl font-extrabold tracking-tight leading-none">
-            BACK<span class="text-mint">STOP</span>
-          </h1>
-          <p class="text-[11px] text-slate-500 tracking-wide uppercase">
-            Voice-agent swarm · denied-claim recovery
-          </p>
+          <div class="brand-name">BACK<b>STOP</b></div>
+          <div class="brand-sub">Voice-agent swarm · denied-claim recovery</div>
         </div>
       </div>
 
-      <div class="flex items-center gap-3">
-        <!-- Connection state pill, driven by app.js -->
+      <div class="topbar-actions">
         <div id="conn-pill" class="conn-pill conn-down">
           <span class="dot"></span><span id="conn-label">connecting…</span>
         </div>
-        <!-- Denial picker, populated from /samples -->
-        <select id="sample-picker" class="picker" title="Choose a denial to work"></select>
-        <button id="run-btn" class="run-btn">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+        <select id="sample-picker" class="picker" title="Choose a denial to work" aria-label="Choose a denial to work"></select>
+        <button id="run-btn" class="btn btn-primary">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="M5 3l14 9-14 9V3z" fill="currentColor" />
           </svg>
-          Work this denial
+          Work denial
         </button>
       </div>
     </header>
 
-    <!-- ========================= COST TICKER ========================= -->
-    <!-- The hero. Big, legible at 10 feet; numbers roll on cost.tick. -->
-    <section id="cost-ticker" class="cost-ticker mb-5">
-      <div class="ticker-left">
-        <div class="ticker-eyebrow">PAVO masked router · live cost collapse</div>
-        <div class="ticker-headline">
-          <span class="t-label">PAVO</span>
-          <span id="pavo-total" class="t-pavo">$0.0000</span>
-          <span class="t-vs">vs frontier</span>
-          <span id="frontier-total" class="t-frontier">$0.0000</span>
+    <!-- ============================ METRIC STRIP ============================ -->
+    <section class="metrics" aria-label="Cost metrics">
+      <div class="metric hero">
+        <div class="metric-label">PAVO cost · this appeal</div>
+        <div class="metric-value tnum"><span id="pavo-total" class="pavo">$0.0000</span></div>
+        <div class="metric-sub">routed across local / mid / frontier tiers</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">All-frontier</div>
+        <div class="metric-value tnum"><span id="frontier-total" class="front">$0.0000</span></div>
+        <div class="metric-sub">counterfactual baseline</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Cost ratio</div>
+        <div class="metric-value tnum"><span id="ratio-big" class="ratio-value">—</span></div>
+        <div class="metric-sub">cheaper than all-frontier</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Tier mix</div>
+        <div class="tierbar" aria-hidden="true">
+          <div class="seg seg-local" style="width:0"></div>
+          <div class="seg seg-mid" style="width:0"></div>
+          <div class="seg seg-front" style="width:0"></div>
         </div>
-      </div>
-      <div class="ticker-right">
-        <div id="ratio-big" class="ratio-big">—</div>
-        <div class="ratio-sub">cheaper</div>
-      </div>
-      <!-- thin tier-mix bar: how many turns went local / mid / frontier -->
-      <div class="tier-bar" id="tier-bar" aria-hidden="true">
-        <div class="seg seg-local" style="width:0%"></div>
-        <div class="seg seg-mid"   style="width:0%"></div>
-        <div class="seg seg-front" style="width:0%"></div>
+        <div class="tier-legend">
+          <span><i style="background:var(--tier-local)"></i>local</span>
+          <span><i style="background:var(--tier-mid)"></i>mid</span>
+          <span><i style="background:var(--tier-frontier)"></i>frontier</span>
+        </div>
       </div>
     </section>
 
-    <!-- ========================= MAIN GRID ========================= -->
-    <div class="grid grid-cols-12 gap-5">
+    <!-- ============================ MAIN GRID ============================ -->
+    <div class="grid-main">
 
-      <!-- LEFT COLUMN: intake spec + sponsor row + reconcile + letter -->
-      <aside class="col-span-12 lg:col-span-4 flex flex-col gap-5">
+      <!-- LEFT COLUMN -->
+      <div class="col">
 
-        <!-- Outcome scoreboard — appears on appeal.done -->
+        <!-- Outcome scoreboard (appears on appeal.done) -->
         <div class="card outcome-card" id="outcome-card" hidden>
-          <div class="outcome-head">✓ Denial overturned</div>
+          <div class="outcome-head">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
+            Denial overturned
+          </div>
           <div class="outcome-grid">
-            <div><span id="oc-recovered" class="oc-num">$0</span><span class="oc-lbl">recovered</span></div>
-            <div><span id="oc-ratio" class="oc-num">—</span><span class="oc-lbl">cheaper</span></div>
-            <div><span id="oc-agents" class="oc-num">0</span><span class="oc-lbl">agents</span></div>
+            <div class="outcome-cell"><span id="oc-recovered" class="oc-num tnum">$0</span><span class="oc-lbl">recovered</span></div>
+            <div class="outcome-cell"><span id="oc-ratio" class="oc-num tnum">—</span><span class="oc-lbl">cheaper</span></div>
+            <div class="outcome-cell"><span id="oc-agents" class="oc-num tnum">0</span><span class="oc-lbl">agents</span></div>
           </div>
           <div class="outcome-foot" id="oc-foot">pending nurse signature</div>
         </div>
 
-        <!-- Intake spec card -->
+        <!-- Appeal spec -->
         <div class="card">
           <div class="card-head">
             <h2 class="card-title">Appeal spec</h2>
             <span class="card-tag">Unsiloed intake</span>
           </div>
-          <div id="spec-body" class="spec-body">
-            <div class="empty-hint">Run a sample denial to parse an EOB.</div>
+          <div id="spec-body" class="card-body">
+            <div class="empty-hint">Choose a denial and select Work denial to parse the EOB.</div>
           </div>
         </div>
 
-        <!-- Reconciler contradiction card -->
+        <!-- Integrations -->
+        <div class="card">
+          <div class="card-head">
+            <h2 class="card-title">Integrations</h2>
+            <span class="card-tag">live real / sim</span>
+          </div>
+          <div class="card-body">
+            <div class="sponsor-list" id="sponsor-row"></div>
+          </div>
+        </div>
+
+        <!-- Contradiction -->
         <div class="card" id="reconcile-card" hidden>
           <div class="card-head">
             <h2 class="card-title">Overturning contradiction</h2>
-            <span class="card-tag tag-red">Reconciler · Moss</span>
+            <span class="card-tag">Reconciler · Moss</span>
           </div>
-          <div id="reconcile-body" class="reconcile-body"></div>
+          <div id="reconcile-body" class="card-body ctr"></div>
         </div>
 
-        <!-- Appeal letter card -->
+        <!-- Appeal letter -->
         <div class="card" id="letter-card" hidden>
           <div class="card-head">
             <h2 class="card-title">Appeal letter</h2>
-            <span class="card-tag tag-green">Drafted · verbatim</span>
+            <span class="card-tag">Drafted · verbatim</span>
           </div>
-          <div id="letter-body" class="letter-body"></div>
+          <div id="letter-body" class="card-body"></div>
         </div>
 
-      </aside>
+      </div>
 
-      <!-- RIGHT COLUMN: the swarm stage (singularity + cells) -->
-      <main class="col-span-12 lg:col-span-8">
+      <!-- RIGHT COLUMN: swarm stage -->
+      <div class="col">
         <div class="card stage-card">
           <div class="card-head">
             <h2 class="card-title">PAVO swarm</h2>
-            <div class="flex items-center gap-3 text-[11px] text-slate-500">
-              <span class="legend"><i class="lg-mint"></i>local / mid</span>
-              <span class="legend"><i class="lg-magenta"></i>frontier flare</span>
+            <div class="tier-legend" style="margin:0">
+              <span><i style="background:var(--tier-mid)"></i>routed call</span>
+              <span><i style="background:var(--tier-frontier)"></i>frontier turn</span>
             </div>
           </div>
-
-          <!-- The stage: a canvas draws particles/flares; DOM nodes for the
-               singularity core and the specialist cells sit on top. -->
           <div id="stage" class="stage">
             <canvas id="fx"></canvas>
-
-            <!-- The PAVO "singularity" — bursts into cells on swarm.spawn -->
             <div id="core" class="core">
               <div class="core-ring"></div>
-              <div class="core-ring core-ring-2"></div>
-              <div class="core-dot"></div>
+              <div class="core-ring r2"></div>
+              <div class="core-disc"></div>
               <div class="core-label">PAVO</div>
             </div>
-
-            <!-- Specialist cells are injected here by app.js -->
             <div id="cells" class="cells"></div>
-
             <div id="stage-hint" class="stage-hint">
-              Idle. Detonate the swarm with <b>Run sample denial</b>.
+              Idle. Select <b>Work denial</b> to detonate the swarm.
             </div>
           </div>
         </div>
-      </main>
+      </div>
     </div>
 
-    <!-- ========================= SPONSOR ROW ========================= -->
-    <section class="mt-5">
-      <div class="sponsor-row" id="sponsor-row">
-        <!-- badges injected by app.js; rendered greyed until sponsor.mode -->
-      </div>
-    </section>
-
-    <footer class="mt-5 text-center text-[11px] text-slate-400">
+    <footer class="footer">
       Synthetic data only · sandbox IVRs · human nurse sign-off required ·
-      every integration shows its real/sim mode — nothing is misrepresented as live.
+      every integration shows its real / sim mode — nothing is misrepresented as live.
     </footer>
   </div>
 
-  <!-- Floating toast for transient status (replay mode, filed, etc.) -->
   <div id="toast" class="toast" hidden></div>
-
   <script src="app.js"></script>
 </body>
 </html>
