@@ -86,6 +86,14 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def _no_cache(request, call_next):
+    """Never serve a stale dashboard — the browser always gets fresh app.js/css."""
+    resp = await call_next(request)
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return resp
+
+
 def _make_emit(appeal_id: str, loop: asyncio.AbstractEventLoop):
     seq = {"n": 0}
 
