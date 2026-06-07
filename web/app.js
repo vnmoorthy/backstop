@@ -31,7 +31,7 @@
     unsiloed: "Unsiloed", aws: "AWS", minimax: "MiniMax", qwen: "Qwen" };
 
   const state = { cells: {}, running: false, billed: 0, agentCount: 0, lastRatio: 1,
-    currentAppeal: null, gotEvent: false };
+    currentAppeal: null, gotEvent: false, swarmNodes: [] };
 
   // ---- load the seeded denials into the picker ----
   async function loadSamples() {
@@ -56,6 +56,7 @@
     els.canvas.width = W * DPR; els.canvas.height = H * DPR;
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     relayoutCells();
+    renderSwarmNodes();
   }
   window.addEventListener("resize", resize);
 
@@ -90,8 +91,45 @@
     });
   }
 
+  // All 23 agents as a constellation of nodes around the PAVO core, always on.
+  function renderSwarmNodes() {
+    const cont = document.getElementById("swarm-nodes");
+    if (!cont || !W || !H || typeof WORKFORCE === "undefined") return;
+    cont.innerHTML = "";
+    state.swarmNodes = [];
+    const cx = W / 2, cy = H / 2;
+    const PC = { Intake: "#818cf8", Triage: "#00d49a", Prep: "#00d49a", Call: "#fbbf24",
+      Reason: "#818cf8", Draft: "#00d49a", File: "#8a8a93", Recover: "#00d49a", Learn: "#818cf8" };
+    const rings = [WORKFORCE.slice(0, 8), WORKFORCE.slice(8)];
+    const rad = [Math.min(W * 0.17, 150), Math.min(W * 0.42, 385)];
+    const ryf = [0.96, 0.82];
+    rings.forEach((list, ri) => {
+      list.forEach((a, i) => {
+        const ang = -Math.PI / 2 + (i / list.length) * Math.PI * 2 + (ri ? 0.21 : 0);
+        const x = Math.max(74, Math.min(W - 74, cx + Math.cos(ang) * rad[ri]));
+        const y = Math.max(34, Math.min(H - 30, cy + Math.sin(ang) * rad[ri] * ryf[ri]));
+        const el = document.createElement("div");
+        el.style.cssText = "position:absolute;left:" + x + "px;top:" + y + "px;transform:translate(-50%,-50%);" +
+          "display:flex;align-items:center;gap:5px;padding:4px 9px;border-radius:999px;white-space:nowrap;" +
+          "border:1px solid rgba(255,255,255,.08);background:rgba(18,18,22,.80);font-size:10px;color:#a1a1a8;z-index:2";
+        el.innerHTML = '<span style="width:5px;height:5px;border-radius:50%;background:' + (PC[a.p] || "#00d49a") +
+          ';flex:none"></span>' + esc(a.n.replace(/ (Agent|Caller)$/, ""));
+        cont.appendChild(el);
+        state.swarmNodes.push({ x: x, y: y });
+      });
+    });
+  }
+
+  function drawSwarmConnectors() {
+    if (!state.swarmNodes || !state.swarmNodes.length) return;
+    const c = coreCenter();
+    ctx.lineWidth = 1; ctx.strokeStyle = "rgba(255,255,255,0.05)";
+    state.swarmNodes.forEach((n) => { ctx.beginPath(); ctx.moveTo(c.x, c.y); ctx.lineTo(n.x, n.y); ctx.stroke(); });
+  }
+
   function tick() {
     ctx.clearRect(0, 0, W, H);
+    drawSwarmConnectors();
     drawConnectors();
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
