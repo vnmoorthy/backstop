@@ -51,9 +51,9 @@ def appeal_to_out(appeal: Appeal) -> AppealOut:
 @router.post("", response_model=AppealOut, status_code=status.HTTP_201_CREATED)
 async def create_appeal(
     body: CreateAppealRequest,
-    principal: Principal = Depends(get_principal),
-    auth: AuthService = Depends(get_auth_service),
-    container: Container = Depends(get_container),
+    principal: Principal = Depends(get_principal),  # noqa: B008
+    auth: AuthService = Depends(get_auth_service),  # noqa: B008
+    container: Container = Depends(get_container),  # noqa: B008
 ) -> AppealOut:
     """Open an appeal from a denial (authn + RBAC ``create`` gate)."""
     require_authorized(
@@ -75,9 +75,9 @@ async def create_appeal(
 @router.get("/{appeal_id}", response_model=AppealOut)
 async def get_appeal(
     appeal_id: str,
-    principal: Principal = Depends(get_principal),
-    auth: AuthService = Depends(get_auth_service),
-    container: Container = Depends(get_container),
+    principal: Principal = Depends(get_principal),  # noqa: B008
+    auth: AuthService = Depends(get_auth_service),  # noqa: B008
+    container: Container = Depends(get_container),  # noqa: B008
 ) -> AppealOut:
     """Read one appeal's redacted view (authn + per-appeal ownership)."""
     require_authorized(

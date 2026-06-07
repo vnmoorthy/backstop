@@ -49,10 +49,10 @@ _ALLOWED_CONTENT_TYPES: Dict[str, ArtifactKind] = {
 async def ingest_artifact(
     appeal_id: str = Form(..., max_length=128),
     kind: str = Form(..., max_length=32),
-    file: UploadFile = File(...),
-    principal: Principal = Depends(get_principal),
-    auth: AuthService = Depends(get_auth_service),
-    container: Container = Depends(get_container),
+    file: UploadFile = File(...),  # noqa: B008
+    principal: Principal = Depends(get_principal),  # noqa: B008
+    auth: AuthService = Depends(get_auth_service),  # noqa: B008
+    container: Container = Depends(get_container),  # noqa: B008
 ) -> IngestionResponse:
     """Validate and ingest a denial artifact for ``appeal_id`` (authn + authz)."""
     require_authorized(

@@ -30,8 +30,8 @@ router = APIRouter(prefix="/triage", tags=["triage"])
 async def triage_worklist(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    principal: Principal = Depends(get_principal),
-    container: Container = Depends(get_container),
+    principal: Principal = Depends(get_principal),  # noqa: B008
+    container: Container = Depends(get_container),  # noqa: B008
 ) -> TriageListOut:
     """Return the urgency-ranked appeal worklist (authn + worklist-reader role)."""
     require_worklist_reader(principal)

@@ -88,11 +88,24 @@ backstop = ["py.typed"]
 line-length = 100
 target-version = "py39"
 src = ["."]
-# The vendored PAVO research package (`backstop/pavo/`) is third-party-derived
-# inference code used only by the PAVO adapter; lint governs the hexagon, not the
-# vendored model. The v1 prototype that previously lived here was removed in M17.
+# The legacy v1 prototype coexists with the v2 hexagon during the rebuild and is
+# removed atomically in the integration milestone (M17). Exclude it so lint
+# governs only the new architecture.
 extend-exclude = [
+    "backstop/server.py",
+    "backstop/swarm.py",
+    "backstop/call.py",
+    "backstop/cost.py",
+    "backstop/reconcile.py",
+    "backstop/letter.py",
+    "backstop/ivr_sim.py",
+    "backstop/models.py",
+    "backstop/integrations",
     "backstop/pavo",
+    "tests/test_call.py",
+    "tests/test_e2e.py",
+    "tests/test_router.py",
+    "tests/load_test.py",
 ]
 
 [tool.ruff.lint]
@@ -129,9 +142,6 @@ ban-relative-imports = "all"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["D", "S101", "S105", "S106"]  # docstrings + asserts/secrets in tests
-# FastAPI dependency-injection idiom: Depends()/File()/Form()/Query() in argument
-# defaults is the framework's intended call signature, not a mutable-default bug.
-"backstop/controllers/**" = ["B008"]
 # Deliberate HTTP-semantic domain exception names (Unauthenticated/Forbidden/
 # ChannelNotFound) — clearer than an -Error suffix at the call site.
 "backstop/domain/errors.py" = ["N818"]
@@ -146,10 +156,6 @@ python_version = "3.9"
 strict = true
 mypy_path = "."
 files = ["backstop"]
-# The vendored PAVO research package is untyped third-party inference code used
-# only by the PAVO adapter (which has its own typed boundary); type-checking
-# governs the hexagon, not the vendored model. Mirrors the ruff exclude above.
-exclude = "^backstop/pavo/"
 warn_unused_configs = true
 warn_redundant_casts = true
 warn_unused_ignores = true

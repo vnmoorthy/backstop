@@ -44,7 +44,7 @@ def get_container(request: Request) -> Container:
 
 
 def get_auth_service(
-    container: Container = Depends(get_container),
+    container: Container = Depends(get_container),  # noqa: B008
 ) -> AuthService:
     """Return the :class:`AuthService` from the container (never ``None``)."""
     service = container.auth_service
@@ -57,8 +57,8 @@ def get_auth_service(
 
 
 def get_principal(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
-    auth: AuthService = Depends(get_auth_service),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),  # noqa: B008
+    auth: AuthService = Depends(get_auth_service),  # noqa: B008
 ) -> Principal:
     """Authenticate the bearer token and return the :class:`Principal`.
 

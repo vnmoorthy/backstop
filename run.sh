@@ -28,16 +28,16 @@ if [ -n "$STALE" ]; then
 fi
 
 # install deps only if missing
-if ! "$PY" -c "import fastapi, uvicorn, reportlab, jwt" >/dev/null 2>&1; then
+if ! "$PY" -c "import fastapi, torch, reportlab, websockets" >/dev/null 2>&1; then
   echo "▸ installing dependencies (one time, ~1 min)…"
   "$PY" -m pip install -q -r requirements.txt || { echo "ERROR: pip install failed." >&2; exit 1; }
 fi
 
-# App sanity (non-fatal — informational only): the v2 app must import.
-if "$PY" -c "from backstop.app import app; assert len(app.routes) > 0" >/dev/null 2>&1; then
-  echo "▸ Backstop app OK (composition root wired)"
+# PAVO sanity (non-fatal — informational only)
+if "$PY" -c "from backstop.pavo import MaskedPAVORouter; assert MaskedPAVORouter().n_params==85041" >/dev/null 2>&1; then
+  echo "▸ PAVO router OK (85,041 params)"
 else
-  echo "▸ WARNING: app import check failed — continuing (the demo may still run)."
+  echo "▸ WARNING: PAVO sanity check failed — continuing (the demo may still run)."
 fi
 
 echo ""
@@ -54,4 +54,4 @@ echo ""
 ( sleep 3; (command -v open >/dev/null && open "http://localhost:$PORT") || \
            (command -v xdg-open >/dev/null && xdg-open "http://localhost:$PORT") || true ) &
 
-exec "$PY" -m uvicorn backstop.app:app --host 0.0.0.0 --port "$PORT"
+exec "$PY" -m backstop.server

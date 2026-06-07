@@ -51,8 +51,8 @@ router = APIRouter(prefix="/review", tags=["review"])
 async def review_queue(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    principal: Principal = Depends(get_principal),
-    container: Container = Depends(get_container),
+    principal: Principal = Depends(get_principal),  # noqa: B008
+    container: Container = Depends(get_container),  # noqa: B008
 ) -> ReviewQueueOut:
     """Return the nurse review queue (authn + worklist-reader role)."""
     require_worklist_reader(principal)
@@ -67,9 +67,9 @@ async def review_queue(
 @router.get("/{appeal_id}/evidence", response_model=ReviewPacketOut)
 async def review_evidence(
     appeal_id: str,
-    principal: Principal = Depends(get_principal),
-    auth: AuthService = Depends(get_auth_service),
-    container: Container = Depends(get_container),
+    principal: Principal = Depends(get_principal),  # noqa: B008
+    auth: AuthService = Depends(get_auth_service),  # noqa: B008
+    container: Container = Depends(get_container),  # noqa: B008
 ) -> ReviewPacketOut:
     """Return the redacted evidence timeline for one appeal (ownership-gated)."""
     require_authorized(
@@ -114,9 +114,9 @@ async def review_evidence(
 async def submit_signoff(
     appeal_id: str,
     body: SignoffRequest,
-    principal: Principal = Depends(get_principal),
-    auth: AuthService = Depends(get_auth_service),
-    container: Container = Depends(get_container),
+    principal: Principal = Depends(get_principal),  # noqa: B008
+    auth: AuthService = Depends(get_auth_service),  # noqa: B008
+    container: Container = Depends(get_container),  # noqa: B008
 ) -> SignoffResponse:
     """Submit a nurse sign-off; file the appeal only if both gates pass."""
     require_authorized(
