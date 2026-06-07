@@ -155,6 +155,23 @@ class LocalFileStoreAdapter:
             raise FileNotFoundError(f"artifact not found or expired: {ref.ref}")
         return self._jailed_path(record.filename).read_bytes()
 
+    async def read_signed(self, ref: str, expires_at_iso: str, token: str) -> bytes:
+        """Return the bytes for ``ref`` iff ``token`` is a live signature.
+
+        The signed token is itself the capability: it is minted by
+        :meth:`get_signed_url` only after a per-appeal ownership check, so a valid
+        token proves the holder was authorised. The controller serving ``/files``
+        calls this — it never reconstructs a principal from an unauthenticated
+        request. A forged or expired token raises :class:`Forbidden`; an
+        unknown/expired ref raises :class:`FileNotFoundError`.
+        """
+        if not self.verify_token(ref, expires_at_iso, token):
+            raise Forbidden("invalid or expired file token")
+        record = self._live_record(ref)
+        if record is None:
+            raise FileNotFoundError(f"artifact not found or expired: {ref}")
+        return self._jailed_path(record.filename).read_bytes()
+
     async def delete(self, ref: ArtifactRef) -> None:
         """Delete the artifact identified by ``ref`` (idempotent)."""
         record = self._records.pop(ref.ref, None)

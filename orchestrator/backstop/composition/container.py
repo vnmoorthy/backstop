@@ -14,8 +14,8 @@ static tooling sees the precise port/service protocols.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Optional, Tuple
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from backstop.infra.config import Settings
@@ -40,6 +40,18 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from backstop.ports.speech_synthesis_port import SpeechSynthesisPort
     from backstop.ports.task_supervisor_port import TaskSupervisorPort
     from backstop.ports.voice_transport_port import VoiceTransportPort
+    from backstop.services.appeal_service import AppealService
+    from backstop.services.auth_service import AuthService
+    from backstop.services.call_service import CallService
+    from backstop.services.ingest_denial_service import IngestDenialService
+    from backstop.services.ingestion_batch_service import IngestionBatchService
+    from backstop.services.letter_service import LetterService
+    from backstop.services.nurse_bridge_service import NurseBridgeService
+    from backstop.services.reconcile_service import ReconcileService
+    from backstop.services.review_service import ReviewService
+    from backstop.services.signoff_service import SignoffService
+    from backstop.services.swarm_service import SwarmService
+    from backstop.services.triage_service import TriageService
 
 
 @dataclass(frozen=True)
@@ -78,6 +90,20 @@ class Container:
     auth: Optional[AuthPort] = None
 
     # ── services (use-cases) ───────────────────────────────────────
-    # Service slots are added by the Services + Integration milestones (M16/M17)
-    # once the service modules exist. The foundation holds the port graph only,
-    # so this skeleton type-checks without forward-referencing unbuilt modules.
+    appeal_service: Optional[AppealService] = None
+    swarm_service: Optional[SwarmService] = None
+    call_service: Optional[CallService] = None
+    reconcile_service: Optional[ReconcileService] = None
+    ingest_service: Optional[IngestDenialService] = None
+    ingestion_batch_service: Optional[IngestionBatchService] = None
+    triage_service: Optional[TriageService] = None
+    letter_service: Optional[LetterService] = None
+    review_service: Optional[ReviewService] = None
+    signoff_service: Optional[SignoffService] = None
+    nurse_bridge_service: Optional[NurseBridgeService] = None
+    auth_service: Optional[AuthService] = None
+
+    # ── lifecycle handles (owned by the app lifespan) ─────────────────
+    # ``http_clients`` are every httpx client a real adapter shares; the
+    # lifespan ``aclose()``s each on shutdown. Empty in sim mode (no transport).
+    http_clients: Tuple[Any, ...] = field(default_factory=tuple)
