@@ -1,0 +1,48 @@
+# One-click live deploy to Render (https://render.com).
+# 1. Push this repo (already done). 2. Render → New → Blueprint → pick this repo.
+# 3. Set the secret env vars (marked sync:false) in the Render dashboard — your
+#    sponsor keys. 4. Deploy. The website is then GENUINELY live (real integrations).
+#
+# After deploy, point the public demo at it: set the GitHub Pages site to redirect
+# to the Render URL, OR just share the Render URL as the live demo.
+services:
+  - type: web
+    name: backstop
+    runtime: docker
+    plan: starter            # 'free' works too; torch makes the image large/slow
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      # ── set these as secrets in the Render dashboard (sync:false) ──
+      - key: MINIMAX_API_KEY
+        sync: false
+      - key: MOSS_PROJECT_ID
+        sync: false
+      - key: MOSS_PROJECT_KEY
+        sync: false
+      - key: MOSS_API_KEY
+        sync: false
+      - key: TRUEFOUNDRY_API_KEY
+        sync: false
+      - key: UNSILOED_API_KEY
+        sync: false
+      - key: QWEN_API_KEY
+        sync: false
+      - key: DASHSCOPE_API_KEY
+        sync: false
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+      # ── non-secret defaults ──
+      - key: MINIMAX_MODEL
+        value: MiniMax-Text-01
+      - key: MINIMAX_BASE_URL
+        value: https://api.minimax.io/v1
+      - key: MOSS_BASE_URL
+        value: https://api.usemoss.dev
+      - key: UNSILOED_BASE_URL
+        value: https://api.unsiloed.ai
