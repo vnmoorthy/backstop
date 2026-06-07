@@ -1,0 +1,1410 @@
+[
+  {
+    "sponsor": "PAVO",
+    "capability": "Masked cost-aware turn router. For each call turn in the appeal swarm, PAVO maps a 12-dim observation (acoustic SNR/noise, hardware cpu/battery/gpu, network RTT/bandwidth, turn complexity, dialogue context depth) to a model-tier profile via a trained 85,041-param MLP meta-controller (state_dim=12 -> hidden=256 -> 48 fine-grained profiles), then collapses the argmax to one of three named pipeline tiers (cloud_premium / hybrid_balanced / ondevice_fast). The coupling mask enforces feasibility: an ASR/LLM pairing whose transcript word-error-rate exceeds the downstream LLM's recovery threshold is treated as infeasible (e.g. ondevice_fast on a complexity>=4 turn). PAVO is ALWAYS real and runs on vendored TMLR checkpoint weights with NO API key and NO network call \u2014 inference is local PyTorch. Its policy is frozen and must not be retrained or re-tuned; the adapter only wraps inference. The chosen tier is then handed to the downstream LLM/ASR/TTS adapters (MiniMax/TrueFoundry, Qwen) so the swarm spends premium compute only on the turns that need it.",
+    "keys_needed": [
+      "NONE \u2014 PAVO has no API key and makes no network call",
+      "PAVO_WEIGHTS_PATH (optional) \u2014 absolute path to the vendored checkpoint (meta_controller_best.pt / meta_controller.pt); falls back to PAVO_BENCH_ROOT then a packaged default",
+      "PAVO_BENCH_ROOT (optional) \u2014 repo root used by pavo_bench.loader to discover experiments/outputs/*.pt",
+      "PAVO_DEVICE (optional, default 'cpu') \u2014 torch device for the real adapter",
+      "PAVO_ADAPTER_IMPL (optional, default 'torch') \u2014 'torch' selects the real PyTorch adapter, 'numpy' selects the sim adapter; composition root reads this to pick the binding"
+    ],
+    "real_api": {
+      "base_url": "NONE \u2014 there is no remote PAVO HTTP API. PAVO is a vendored on-prem model. 'base_url' is not applicable; the 'endpoint' is a local PyTorch forward pass over checkpoint weights bundled in the repo at experiments/outputs/meta_controller_best.pt (344KB raw state_dict) and experiments/outputs/meta_controller.pt (1MB dict with model_state_dict + architecture + training metadata).",
+      "auth_scheme": "none \u2014 no key, no token, no signing. The 'auth' is filesystem access to the vendored checkpoint. Treat the .pt files as read-only release artifacts under version control.",
+      "endpoints": [
+        {
+          "name": "load_pretrained",
+          "kind": "python_sdk",
+          "import": "from pavo_bench import load_pretrained, MetaController, PretrainedPAVORouter, PAVOBenchTurn, turn_to_state_vector",
+          "signature": "load_pretrained(repo_root: str|None=None, device: str='cpu') -> tuple[MetaController, dict]",
+          "behavior": "Discovers and torch.load()s the checkpoint (handles both raw state_dict and {'model_state_dict','architecture'} formats), builds MetaController(state_dim=12,hidden=256,n_profiles=48), loads weights, .eval(). Returns (model, info) where info carries checkpoint_path, n_params_loaded(=85041), architecture, training_steps, final_reward, hyperparameters.",
+          "verified": "Confirmed against the real checkpoint: keys=['optimizer_state_dict','architecture','n_params','training_steps','final_reward','hyperparameters']; architecture={'state_dim':12,'hidden':256,'n_profiles':48}."
+        },
+        {
+          "name": "MetaController.forward",
+          "kind": "python_sdk",
+          "signature": "MetaController.forward(state: torch.Tensor[B,12]) -> tuple[logits: torch.Tensor[B,48], value: torch.Tensor[B,1]]",
+          "behavior": "policy net = Linear(12->256)->ReLU->Linear(256->256)->ReLU->Linear(256->48); separate value head = Linear(12->256)->ReLU->Linear(256->1). Routing uses argmax over the 48 policy logits.",
+          "param_tensors": "net.0.weight[256,12], net.0.bias[256], net.2.weight[256,256], net.2.bias[256], net.4.weight[48,256], net.4.bias[48], value_head.* (unused for routing) \u2014 all float32, verified loaded."
+        },
+        {
+          "name": "turn_to_state_vector",
+          "kind": "python_sdk",
+          "signature": "turn_to_state_vector(turn: PAVOBenchTurn) -> np.ndarray[float32, 12]",
+          "behavior": "Encodes [clamp(snr,0,50)/50, 0.4 (speaking_rate default), 0.5 (pitch_var default), snr/50 (WADA proxy), cpu_util, 0.8 (ram default), battery, 0.3 (gpu default), rtt_ms/200, 0.5 (bandwidth default), complexity/5, ctx_tokens/2000]. Only 4 of 12 dims vary per turn (snr, cpu_util, battery, rtt_ms via the turn); complexity and ctx_tokens are also turn-derived. Remaining are training-time defaults \u2014 do NOT change them (part of the frozen policy contract)."
+        },
+        {
+          "name": "PretrainedPAVORouter.route",
+          "kind": "python_sdk",
+          "signature": "PretrainedPAVORouter(model, device='cpu').route(turn: PAVOBenchTurn) -> Profile  # 'cloud_premium'|'ondevice_fast'|'hybrid_balanced'",
+          "behavior": "state=turn_to_state_vector(turn); logits,_=model(tensor); idx=argmax(logits); collapse 48->3: idx<2 -> ondevice_fast, idx<29 -> hybrid_balanced, else cloud_premium. This collapse mapping is the vendor's published PAVO-adaptive distribution split (~4% edge / 56% hybrid / 40% cloud) and must be preserved verbatim."
+        }
+      ],
+      "sdk_or_lib": "pavo_bench (local package, already vendored at pavo-bench/pavo_bench/). Real adapter depends on: torch, numpy. Checkpoint artifacts: pavo-bench/experiments/outputs/meta_controller_best.pt and meta_controller.pt.",
+      "notes": "IMPORTANT / verified facts: (1) PAVO is NOT a SaaS \u2014 there is no api.pavo.* base URL, no bearer token, no rate limit. The 'real API' is local inference over a vendored TMLR checkpoint. I verified this by inspecting pavo-bench/pavo_bench/* and torch.load-ing the actual .pt \u2014 it is a plain nn.Module state_dict. (2) The policy is frozen: do not call .train(), do not fine-tune, do not alter turn_to_state_vector defaults or the 48->3 collapse thresholds; the RoutingPort exposes only inference. (3) Because the 'real adapter' is local torch and the only failure modes are missing-checkpoint and missing-torch, the sim adapter is unusually faithful: it re-implements the exact MLP forward in pure NumPy over the SAME vendored weights. I empirically verified bit-faithfulness: over 2000 random 12-dim states the NumPy forward and the torch forward agree on argmax with ZERO mismatches and max abs logit error 1.9e-6. So the sim adapter is genuine local model inference, not an echo, and is safe to use as a test double AND as the torch-free production fallback. (4) No PHI ever touches PAVO \u2014 the state vector is pure telemetry (SNR, cpu, battery, rtt, integer complexity, token count). This is the one sponsor where the sim path is policy-identical to the real path; the only difference is the linear-algebra backend (torch vs numpy)."
+    },
+    "port_name": "RoutingPort",
+    "port_methods": [
+      {
+        "name": "route",
+        "signature": "route(self, obs: TurnObservation) -> RoutingDecision",
+        "purpose": "Pure, synchronous, side-effect-free. Map one call-turn observation to a model-tier decision. The single load-bearing method the swarm calls per turn. Implementations must be deterministic for a given obs (argmax of a frozen MLP)."
+      },
+      {
+        "name": "explain",
+        "signature": "explain(self, obs: TurnObservation) -> RoutingExplanation",
+        "purpose": "Return the decision plus its rationale: the 48-way argmax index, the top-k logits, the collapsed tier, the value-head estimate, and whether the coupling mask flagged the cheapest tier infeasible for this turn. Feeds the per-appeal evidence timeline / audit trail (NOW-feature substrate) so a nurse can see why a given turn used premium vs edge compute. Default impl may delegate to route() and fill rationale=None for adapters that cannot introspect."
+      },
+      {
+        "name": "is_feasible",
+        "signature": "is_feasible(self, tier: ModelTier, obs: TurnObservation) -> bool",
+        "purpose": "Expose the coupling-mask constraint independently: would routing tier `tier` on turn `obs` violate the ASR->LLM coupling cliff (transcript WER beyond the LLM's recovery threshold)? Used by the Service layer to validate overrides and to refuse an infeasible manual tier pin. Mirrors _profile_costs.infeasible_for_turn(profile, complexity)."
+      },
+      {
+        "name": "tiers",
+        "signature": "tiers(self) -> tuple[ModelTier, ...]",
+        "purpose": "Return the stable, ordered tier vocabulary this router can emit (CLOUD_PREMIUM, HYBRID_BALANCED, ONDEVICE_FAST). Lets the composition root validate that downstream LLM/ASR/TTS adapters have a binding for every tier the router can produce. Keeps the tier enum out of the swarm."
+      }
+    ],
+    "real_adapter": "TorchPavoRoutingAdapter (file: orchestrator/backstop/adapters/pavo/torch_routing_adapter.py \u2014 ONE class, ONE responsibility: torch inference behind RoutingPort). Construction (done once, by the composition root, not per turn): calls pavo_bench.load_pretrained(repo_root=PAVO_BENCH_ROOT or settings.pavo_weights_path, device=PAVO_DEVICE) to get the frozen MetaController + info dict; asserts info['n_params_loaded']==85041 and info['architecture']['n_profiles']==48 (fail-fast guard that the vendored weights are the released ones); wraps it in pavo_bench.PretrainedPAVORouter and stores model/device. It is stateless per call and thread-safe under torch.no_grad (model.eval()), so a single instance is shared across the whole swarm. route(obs): (1) translate the adapter-neutral TurnObservation -> a PAVOBenchTurn (the only field translation needed; complexity/snr_db/cpu_util/battery/rtt_ms/ctx_tokens map 1:1, user_input/reference_response are '' because PAVO never sees PHI), (2) state = turn_to_state_vector(turn), (3) with torch.no_grad(): logits, value = model(torch.from_numpy(state).unsqueeze(0).to(device)), (4) idx = int(argmax(logits)), collapse via the vendor thresholds (idx<2 -> ONDEVICE_FAST, idx<29 -> HYBRID_BALANCED, else CLOUD_PREMIUM), (5) return RoutingDecision(tier, profile_idx=idx, value=float(value), source='torch'). explain() reuses the same forward, additionally returns top-k logits (torch.topk), softmax confidence, the value-head scalar, and is_feasible(tier,obs). is_feasible() delegates to pavo_bench._profile_costs.infeasible_for_turn (negated). tiers() returns the three ModelTier enums. The adapter NEVER mutates the model, never calls .train(), never re-tunes \u2014 policy frozen. No network, no key, no PHI. Failure modes: FileNotFoundError (missing checkpoint) and ImportError (no torch) are caught at construction in the composition root, which then logs and falls back to the NumPy adapter so the swarm never crashes on a torch-less host.",
+    "sim_adapter": "NumpyPavoRoutingAdapter (file: orchestrator/backstop/adapters/pavo/numpy_routing_adapter.py \u2014 ONE class, ONE responsibility: torch-free inference behind RoutingPort). This is NOT an echo and NOT a heuristic \u2014 it is a faithful pure-NumPy reimplementation of the identical MLP forward pass over the SAME vendored checkpoint weights. Construction: torch.load (or, to avoid the torch dep entirely in CI, safetensors / a one-time np.savez export 'meta_controller_weights.npz' produced from the .pt) to pull the six policy tensors net.0/2/4.{weight,bias} as numpy float32 arrays; the value-head tensors are loaded too for explain(). route(obs): build the same 12-dim state via a vendored copy of turn_to_state_vector (pure numpy already), then forward = relu(x@W0.T+b0); relu(h@W2.T+b2); logits = h@W4.T+b4 with np.maximum(.,0) for ReLU; idx=int(logits.argmax()); collapse with the SAME idx<2 / idx<29 thresholds; return RoutingDecision(..., source='numpy'). explain() additionally computes value = (relu(x@Wv0.T+bv0))@Wv2.T+bv2 and a numpy softmax for confidence. EMPIRICALLY VERIFIED bit-faithful: over 2000 random states the numpy argmax equals the torch argmax with 0 mismatches and max abs logit error 1.9e-6, so this sim adapter reproduces PAVO's frozen policy exactly while running with zero torch dependency \u2014 making it both the production fallback for torch-less hosts AND the canonical test double for contract tests. is_feasible()/tiers() identical to the real adapter (shared via a small _coupling.py the two adapters both import, keeping ONE responsibility per file). Because it loads real trained weights and runs real linear algebra, it satisfies 'sim does genuine local work, never an echo'.",
+    "wiring": "Layering per the hexagonal mandate: Controller (server.py WS/route handler) -> Service (TurnService / the per-turn PAVO loop in call.py, recast as a use-case) -> RoutingPort -> {TorchPavoRoutingAdapter | NumpyPavoRoutingAdapter}. Composition root (orchestrator/backstop/composition.py / DI container) constructs exactly ONE RoutingPort instance at startup: it reads PAVO_ADAPTER_IMPL (default 'torch'), tries TorchPavoRoutingAdapter, and on ImportError(torch missing)/FileNotFoundError(checkpoint missing) logs a structured warning and binds NumpyPavoRoutingAdapter instead (which itself can load the .npz export with no torch). That single instance is injected into TurnService and shared across the whole swarm (model is read-only + thread-safe, so it does NOT contribute to the lock-scope-serializes-the-swarm vuln \u2014 routing happens lock-free). INVOCATION POINT: inside the per-turn loop in call.py (the 'PAVO loop'), at the very start of each turn, BEFORE the LLM/ASR/TTS adapters are called: tier = routing_port.route(TurnObservation(complexity=estimated_turn_complexity, snr_db=ivr_snr, cpu_util=host_cpu, battery=1.0, rtt_ms=transport_rtt_from_livekit, ctx_tokens=len(dialogue_ctx))). The returned ModelTier then selects which downstream adapter tier to call \u2014 CLOUD_PREMIUM routes the reasoning turn to TrueFoundry-gateway/MiniMax premium + Qwen full TTS; HYBRID_BALANCED routes to premium ASR + cheaper LLM; ONDEVICE_FAST routes to the cheap edge pairing \u2014 so PAVO is genuinely load-bearing: it gates real spend on every turn and its choice changes which sponsor adapter runs. cost.py reads RoutingDecision.tier to attribute per-turn cost. The RoutingExplanation from explain() is appended to the per-appeal evidence timeline (NOW-feature: nurse can audit why each turn picked its tier), and is_feasible() guards any human/manual tier override before resubmit-vs-appeal routing. No PHI flows into the port (telemetry only), so PAVO sits cleanly on the redacted side of the TrueFoundry boundary.",
+    "tests": [
+      {
+        "name": "test_routing_port_contract",
+        "kind": "contract",
+        "target": "both adapters via a parametrized fixture (params=[torch_adapter, numpy_adapter]); torch case skipped if torch unavailable",
+        "asserts": [
+          "route(obs) returns a RoutingDecision whose .tier is a member of port.tiers()",
+          "tiers() == (CLOUD_PREMIUM, HYBRID_BALANCED, ONDEVICE_FAST) for both adapters",
+          "route() is deterministic: same obs -> same tier across 100 repeated calls (frozen-policy invariant)",
+          "route() is pure: calling it does not mutate the adapter (model params unchanged hash before/after)",
+          "explain(obs).tier == route(obs).tier and explain returns a profile_idx in [0,48)",
+          "is_feasible(ONDEVICE_FAST, obs(complexity=5)) is False and is_feasible(CLOUD_PREMIUM, obs(complexity=5)) is True (coupling-mask contract, mirrors _profile_costs.infeasible_for_turn)",
+          "route() never raises on boundary obs (snr=0, snr=100->clamped, rtt=0, ctx_tokens=0, complexity in 1..5)"
+        ]
+      },
+      {
+        "name": "test_numpy_matches_torch_bitfaithful",
+        "kind": "equivalence/golden",
+        "target": "NumpyPavoRoutingAdapter vs TorchPavoRoutingAdapter on identical weights (skipped if torch missing)",
+        "asserts": [
+          "over >=2000 random TurnObservations the two adapters return the IDENTICAL ModelTier (0 mismatches \u2014 this is the proof the sim is faithful, not an echo)",
+          "max abs logit error between numpy and torch forward < 1e-4 (observed 1.9e-6)",
+          "argmax index agreement is exact"
+        ],
+        "note": "Locks in the empirically verified equivalence so the sim can be trusted as both fallback and test double."
+      },
+      {
+        "name": "test_torch_adapter_loads_released_weights",
+        "kind": "unit/integration (real adapter)",
+        "target": "TorchPavoRoutingAdapter construction",
+        "asserts": [
+          "loads checkpoint and info['n_params_loaded'] == 85041",
+          "info['architecture'] == {state_dim:12, hidden:256, n_profiles:48}",
+          "fail-fast: constructing with a tampered/wrong-shape checkpoint raises a clear AdapterConfigError",
+          "model is in eval() mode and requires_grad path is never taken (no .train() call); a spy asserts model.train was never invoked"
+        ]
+      },
+      {
+        "name": "test_numpy_adapter_no_torch",
+        "kind": "unit (sim adapter isolation)",
+        "target": "NumpyPavoRoutingAdapter loading from the .npz weight export",
+        "asserts": [
+          "import works and route() runs with torch absent (simulate via sys.modules['torch']=None / monkeypatch)",
+          "loads the six policy tensors with correct shapes [256,12],[256],[256,256],[256],[48,256],[48]",
+          "ReLU is exact (np.maximum vs negative inputs) and logits dtype float32",
+          "produces a valid tier on a known fixture obs"
+        ]
+      },
+      {
+        "name": "test_state_encoding_frozen",
+        "kind": "unit (policy-freeze guard)",
+        "target": "the vendored turn_to_state_vector copy used by both adapters",
+        "asserts": [
+          "12-dim float32 output; snr clamped to [0,50] then /50; complexity/5; ctx_tokens/2000; rtt_ms/200",
+          "the 5 training-time defaults (speaking_rate=0.4, pitch_var=0.5, ram=0.8, gpu=0.3, bandwidth=0.5) are present and UNCHANGED \u2014 golden vector compared byte-for-byte against pavo_bench.state.turn_to_state_vector on the same turn (guards against accidental policy drift)"
+        ]
+      },
+      {
+        "name": "test_collapse_thresholds_golden",
+        "kind": "unit (policy-freeze guard)",
+        "target": "the 48->3 collapse function shared by both adapters",
+        "asserts": [
+          "idx in {0,1} -> ONDEVICE_FAST; idx in 2..28 -> HYBRID_BALANCED; idx in 29..47 -> CLOUD_PREMIUM",
+          "matches PretrainedPAVORouter.route boundaries exactly (parametrized over all 48 indices)"
+        ]
+      },
+      {
+        "name": "test_service_uses_port_as_double",
+        "kind": "unit (Service layer, sim as test double)",
+        "target": "TurnService with an injected fake RoutingPort",
+        "asserts": [
+          "TurnService.handle_turn calls routing_port.route exactly once per turn, before invoking any LLM/ASR/TTS port (call-order spy)",
+          "the returned tier selects the correct downstream adapter binding (CLOUD_PREMIUM -> premium LLM port, ONDEVICE_FAST -> edge port)",
+          "RoutingExplanation is recorded to the evidence timeline exactly once per turn",
+          "a manual tier override that is_feasible()==False is rejected by the Service (raises InfeasibleTierError), exercising the coupling guard end-to-end"
+        ],
+        "note": "Uses NumpyPavoRoutingAdapter (or an in-memory FakeRoutingPort) as the test double so the Service test needs no torch and no checkpoint."
+      },
+      {
+        "name": "test_composition_root_fallback",
+        "kind": "unit (DI / composition root)",
+        "target": "build_routing_port() in composition.py",
+        "asserts": [
+          "with torch present + checkpoint present -> returns TorchPavoRoutingAdapter",
+          "with torch import forced to fail -> returns NumpyPavoRoutingAdapter and logs a structured warning (caplog)",
+          "with checkpoint missing -> FileNotFoundError handled, falls back to numpy adapter loading the packaged .npz",
+          "exactly one instance is built and the same instance is shared (singleton in the container)"
+        ]
+      }
+    ]
+  },
+  {
+    "sponsor": "Moss",
+    "capability": "Real-time semantic retrieval of the winning rebuttal + precedent on the denial-reason turn. Given a denial reason (CARC/RARC code + payer + procedure context) emitted mid-call, return the top-k ranked evidence chunks \u2014 appeal runbook passages, policy citations, and prior-overturn precedents \u2014 that the composer (MiniMax) turns into the spoken rebuttal and that letter.py cites verbatim in the audit-grade appeal letter. This is the \"find the exact rebuttal in real time\" half of the product. Each retrieved chunk carries a provenance handle (source doc id, span, score) so the appeal letter is auditable and every claim is traceable to a runbook/policy source.",
+    "keys_needed": [
+      "MOSS_PROJECT_ID",
+      "MOSS_PROJECT_KEY",
+      "MOSS_BASE_URL (optional, defaults to https://api.usemoss.dev)",
+      "MOSS_TIMEOUT_S (optional, defaults to 2.0 \u2014 bounded so a slow retrieval never stalls the call turn)"
+    ],
+    "real_api": {
+      "base_url": "https://api.usemoss.dev",
+      "auth_scheme": "Project-scoped API key. Send both the project id and project key on every request. Most likely header form: `Authorization: Bearer ${MOSS_PROJECT_KEY}` plus `X-Moss-Project: ${MOSS_PROJECT_ID}` (alternatively the project id is a path segment: /v1/projects/{MOSS_PROJECT_ID}/...). Treat MOSS_PROJECT_KEY as a secret; it is loaded from env/secret store at the composition root and never logged. CONFIDENCE: MEDIUM \u2014 usemoss.dev is a newer retrieval vendor and the exact header names are not something I can confirm from memory; the project-scoped (id + key) shape is given by the product brief and is the most likely contract. The adapter centralizes header construction in one private method so a single edit fixes it if the live docs differ.",
+      "endpoints": [
+        {
+          "name": "query / retrieve",
+          "method": "POST",
+          "path": "/v1/query",
+          "purpose": "Semantic retrieval over the project's indexed corpus. THE load-bearing call.",
+          "request_body": {
+            "query": "string \u2014 natural-language denial-context query, e.g. 'CO-197 prior authorization not obtained, payer Aetna, CPT 70553 MRI brain, inpatient, retro-auth allowed?'",
+            "top_k": "int \u2014 default 5",
+            "filters": "object (optional) \u2014 metadata pre-filter, e.g. {\"payer\": \"aetna\", \"doc_type\": [\"runbook\",\"policy\",\"precedent\"]}",
+            "rerank": "bool (optional) \u2014 request server-side reranking of candidates",
+            "min_score": "float (optional) \u2014 drop chunks below this similarity"
+          },
+          "response_body": {
+            "results": "array of { id: string, text: string, score: float (0..1), metadata: { source: string, doc_type: string, payer?: string, carc?: string, rarc?: string, span?: [start,end], url?: string } }",
+            "query_id": "string \u2014 server-side trace id for audit/debug",
+            "latency_ms": "int (optional)"
+          },
+          "notes": "Response is mapped 1:1 into the port's EvidenceChunk DTOs. The 'id', 'score', 'source' fields become the provenance handle carried into the appeal letter."
+        },
+        {
+          "name": "upsert / index documents",
+          "method": "POST",
+          "path": "/v1/documents",
+          "purpose": "Index/refresh the appeal-runbook + policy + precedent corpus into the project. Used by a one-time/seed ingestion job (scripts/seed_moss.py), NOT on the hot path.",
+          "request_body": {
+            "documents": "array of { id: string, text: string, metadata: {source, doc_type, payer?, carc?, rarc?} }"
+          },
+          "response_body": {
+            "indexed": "int",
+            "document_ids": "array of string"
+          },
+          "notes": "Lets the SAME data/runbooks/*.md corpus that powers the sim adapter also back the real adapter, so real and sim retrieve over identical source-of-truth content \u2014 only the ranking engine differs."
+        },
+        {
+          "name": "health",
+          "method": "GET",
+          "path": "/v1/health",
+          "purpose": "Liveness/readiness probe surfaced on the dashboard's per-integration real/sim badge.",
+          "response_body": {
+            "status": "string ('ok')"
+          }
+        }
+      ],
+      "sdk_or_lib": "No stable official Python SDK assumed. Use httpx.AsyncClient (async \u2014 the call loop is asyncio; never block the event loop) with a single shared client created at the composition root and injected into the real adapter. tenacity for one bounded retry on 5xx/timeout. CONFIDENCE on SDK existence: LOW \u2014 implement directly against the REST contract above; if an official `moss` PyPI package exists at build time, wrap it behind the same adapter without changing the port.",
+      "notes": "All endpoint paths/headers are isolated in MossHttpAdapter and one MossEndpoints config object, so divergence from the live API is a one-file fix and never leaks past the port. PHI HANDLING: the query string is built from denial context (CARC/RARC, payer, CPT, place-of-service) \u2014 NOT from member IDs/PHI. The Service layer redacts (via TrueFoundry) before the query ever reaches this adapter; the adapter additionally asserts no PHI patterns in the outbound query as defense-in-depth, satisfying the 'PHI streamed unredacted' Critical finding for this egress path."
+    },
+    "port_name": "RetrievalPort",
+    "port_methods": [
+      {
+        "signature": "async def retrieve(self, query: RetrievalQuery) -> RetrievalResult",
+        "purpose": "THE core method. Given a structured denial-context query, return ranked evidence (winning rebuttal passages + precedents). Pure, side-effect-free from the caller's view; raises RetrievalError (a domain error, never a vendor/httpx exception) on failure so the Service can fall back or degrade gracefully. Bounded by query.timeout_s.",
+        "dto_in": "RetrievalQuery(text: str, top_k: int = 5, filters: dict[str, Any] | None = None, min_score: float = 0.0, timeout_s: float = 2.0) \u2014 frozen dataclass, validated in __post_init__ (text non-empty, top_k in 1..50).",
+        "dto_out": "RetrievalResult(chunks: list[EvidenceChunk], query_id: str, source_mode: Literal['real','sim'], latency_ms: int). EvidenceChunk(id: str, text: str, score: float, source: str, doc_type: str, metadata: Mapping[str, Any]) \u2014 frozen dataclass; score normalized 0..1 by BOTH adapters so real and sim are comparable. source_mode lets the dashboard label provenance honestly per the honesty contract."
+      },
+      {
+        "signature": "async def health(self) -> RetrievalHealth",
+        "purpose": "Report adapter liveness + which mode is active, for the dashboard per-integration badge and readiness checks. Never raises; returns RetrievalHealth(ok: bool, mode: Literal['real','sim'], detail: str).",
+        "dto_in": "none",
+        "dto_out": "RetrievalHealth(ok: bool, mode: Literal['real','sim'], detail: str)"
+      }
+    ],
+    "real_adapter": "MossHttpAdapter(RetrievalPort) in orchestrator/backstop/integrations/moss.py (real mode). ONE responsibility: translate RetrievalQuery -> POST /v1/query over Moss's project-scoped REST API and map the JSON response back into RetrievalResult/EvidenceChunk DTOs. Construction (composition root): MossHttpAdapter(client: httpx.AsyncClient, project_id: str, project_key: str, endpoints: MossEndpoints, clock: Clock). It does NOT create its own client or read os.environ \u2014 both are injected (testability + single secret-load site). retrieve(): (1) assert query text contains no PHI patterns (member-id/SSN regex) as defense-in-depth; (2) build headers via private _auth_headers() (Authorization: Bearer + X-Moss-Project); (3) POST {query, top_k, filters, min_score, rerank:true} with timeout=query.timeout_s; (4) on 5xx/timeout do exactly one bounded retry (tenacity), then raise RetrievalError \u2014 caller decides fallback; (5) map results[] -> EvidenceChunk, clamp/normalize score to 0..1, set source_mode='real', latency_ms from injected clock. NO business logic, NO query construction (Service builds the query), NO PHI redaction (done upstream by the TrueFoundry port). health() GETs /v1/health and maps to RetrievalHealth(mode='real'). All vendor exceptions are caught and re-raised as the domain RetrievalError so nothing vendor-shaped escapes the port \u2014 the Service and tests only ever see port-level types.",
+    "sim_adapter": "LocalTfidfRetrievalAdapter(RetrievalPort) in orchestrator/backstop/integrations/moss_sim.py (sim mode) \u2014 a GENUINE local retriever, never an echo. ONE responsibility: rank data/runbooks/*.md chunks against the query with a real TF-IDF + cosine engine. Construction: LocalTfidfRetrievalAdapter(corpus: RunbookCorpus, vectorizer: TfidfVectorizer, clock: Clock) \u2014 corpus and fitted vectorizer injected (the index is built ONCE at the composition root from data/runbooks/, not per-call). Build step (composition root, not in the adapter): load every data/runbooks/*.md, split on markdown headings into chunks, attach metadata (source=filename, doc_type/payer/carc parsed from front-matter or filename convention), fit sklearn TfidfVectorizer(ngram_range=(1,2), sublinear_tf=True, stop_words='english'). retrieve(): transform query text with the SAME fitted vectorizer, compute cosine similarity against the chunk matrix (sklearn linear_kernel), apply filters as metadata pre-mask and min_score threshold, take top_k, map to EvidenceChunk with the real cosine score in 0..1, source_mode='sim'. This returns DIFFERENT, query-relevant ranked chunks for different denial reasons (CO-197 vs CO-50 vs N130 surface different runbooks) \u2014 proving it does real retrieval work. Implemented with stdlib+sklearn only (no network), so it is the deterministic test double AND the production fallback when MOSS keys are absent. health() returns RetrievalHealth(ok=corpus non-empty, mode='sim'). Identical port contract, identical DTOs, normalized identical score range \u2014 fully swappable with the real adapter.",
+    "wiring": "Layering Controller -> Service -> RetrievalPort -> {MossHttpAdapter | LocalTfidfRetrievalAdapter}, wired by the DI composition root. INVOCATION POINT: inside call.py's per-turn PAVO loop, on the DENIAL-REASON turn. Flow per turn: ASR transcript -> intent/turn classification -> when the turn is classified as the payer stating the denial reason (CARC/RARC + context), the AppealService (use-case layer, e.g. services/rebuttal_service.py) builds a RetrievalQuery from the structured denial context (denial code, payer, CPT/HCPCS, place-of-service) \u2014 NOT raw PHI \u2014 and awaits retrieval_port.retrieve(query). The returned EvidenceChunks are then (a) handed to the MiniMax composer port to compose the spoken rebuttal line (Qwen TTS speaks it via LiveKit), and (b) attached to the appeal's evidence timeline with their provenance handles so letter.py cites them verbatim in the audit-grade letter and the nurse review queue shows the source of every claim. COMPOSITION ROOT (server.py startup / a di.py container): reads MOSS_PROJECT_ID + MOSS_PROJECT_KEY from the secret store; if both present and reachable -> bind RetrievalPort to MossHttpAdapter; else -> bind to LocalTfidfRetrievalAdapter (sim). Either way ONE shared httpx.AsyncClient and ONE pre-fitted TF-IDF index are created at startup and torn down on graceful shutdown (addresses the no-graceful-shutdown / fire-and-forget findings). The Service depends only on RetrievalPort, so swapping real<->sim needs zero Service/Controller/test changes. The active mode is published to the dashboard's per-integration real/sim badge via health().",
+    "tests": [
+      {
+        "name": "test_retrieval_query_validation",
+        "type": "unit",
+        "target": "RetrievalQuery DTO",
+        "asserts": "empty text raises ValueError; top_k outside 1..50 raises; min_score outside 0..1 raises; valid query is frozen/immutable and hashable. Pure, no I/O."
+      },
+      {
+        "name": "test_evidence_chunk_score_normalized",
+        "type": "unit",
+        "target": "EvidenceChunk DTO",
+        "asserts": "score is clamped to [0,1] at construction; chunk is frozen; provenance fields (id, source, doc_type) are required/non-empty."
+      },
+      {
+        "name": "test_sim_adapter_does_real_retrieval_not_echo",
+        "type": "unit",
+        "target": "LocalTfidfRetrievalAdapter",
+        "asserts": "Build index over a fixture data/runbooks/ (3 md files: CO-197 prior-auth, CO-50 medical-necessity, N130 plan-provision). Query 'prior authorization not obtained' ranks the CO-197 runbook chunk FIRST with score>0 and that chunk's text is NOT the verbatim query (proves real ranking, not echo). A different query 'not medically necessary' ranks the CO-50 chunk first. Deterministic across runs (seeded/stable TF-IDF)."
+      },
+      {
+        "name": "test_sim_adapter_filters_and_topk",
+        "type": "unit",
+        "target": "LocalTfidfRetrievalAdapter",
+        "asserts": "filters={'payer':'aetna'} excludes non-Aetna chunks; top_k=1 returns exactly one chunk; min_score=0.99 returns empty list without raising; source_mode=='sim'."
+      },
+      {
+        "name": "test_real_adapter_maps_response_to_dtos",
+        "type": "unit",
+        "target": "MossHttpAdapter",
+        "asserts": "With a stubbed httpx transport (httpx.MockTransport) returning a canned /v1/query JSON, retrieve() produces RetrievalResult with the right EvidenceChunks, scores normalized 0..1, query_id propagated, source_mode=='real', latency_ms from a fake injected Clock. Verifies the outbound request body (query/top_k/filters) and that auth headers (Authorization Bearer + X-Moss-Project) are present and the key is never the project_id."
+      },
+      {
+        "name": "test_real_adapter_retries_then_raises_domain_error",
+        "type": "unit",
+        "target": "MossHttpAdapter",
+        "asserts": "MockTransport returns 503 twice -> exactly one retry happens then RetrievalError (domain type, NOT httpx.HTTPStatusError) is raised; on timeout, RetrievalError raised within ~timeout_s; no vendor exception escapes the port."
+      },
+      {
+        "name": "test_real_adapter_rejects_phi_in_query",
+        "type": "unit",
+        "target": "MossHttpAdapter",
+        "asserts": "A query whose text contains a member-id/SSN pattern raises RetrievalError BEFORE any network call (MockTransport asserts zero requests) \u2014 defense-in-depth for the PHI-egress Critical finding."
+      },
+      {
+        "name": "test_contract_both_adapters_satisfy_port",
+        "type": "contract",
+        "target": "RetrievalPort (parametrized over MossHttpAdapter w/ MockTransport AND LocalTfidfRetrievalAdapter)",
+        "asserts": "Same parametrized suite runs against BOTH adapters: retrieve() returns RetrievalResult whose chunks are EvidenceChunk, len<=top_k, scores in [0,1] descending, source_mode in {'real','sim'}; health() returns RetrievalHealth with matching mode and never raises. Proves real/sim are truly swappable behind the port (the sim adapter is the test double for everything downstream)."
+      },
+      {
+        "name": "test_service_invokes_retrieval_on_denial_turn",
+        "type": "unit",
+        "target": "RebuttalService (call-loop use case)",
+        "asserts": "Inject a fake RetrievalPort (returning known chunks) into the Service; feed a denial-reason turn -> Service builds a RetrievalQuery from structured denial context (no PHI), calls retrieve() exactly once, and attaches returned chunks (with provenance) to the appeal evidence timeline. Feed a non-denial turn -> retrieve() NOT called. The LocalTfidfRetrievalAdapter doubles as the realistic stand-in here, so the whole call loop is testable offline with zero network and zero MOSS keys."
+      },
+      {
+        "name": "test_composition_root_mode_selection",
+        "type": "unit",
+        "target": "DI composition root",
+        "asserts": "With MOSS_PROJECT_ID+MOSS_PROJECT_KEY set (and health stub ok) -> RetrievalPort resolves to MossHttpAdapter (mode 'real'); with keys absent -> resolves to LocalTfidfRetrievalAdapter (mode 'sim'); the resolved port's health().mode matches the dashboard badge value. Secrets are read once here and not re-read by adapters."
+      }
+    ]
+  },
+  {
+    "sponsor": "TrueFoundry",
+    "capability": "LLM Gateway chokepoint: the single port that EVERY model call (MiniMax reasoning, line composition, rebuttal synthesis, letter drafting, classification) is forced to flow through. On the way out it redacts PHI from prompts; it routes the redacted prompt to an upstream model via TrueFoundry's OpenAI-compatible gateway; on the way back it re-redacts the completion, appends a tamper-evident (hash-chained) audit record, and feeds token usage + priced cost into the cost ledger. No code anywhere else in Backstop is allowed to call an LLM SDK directly \u2014 they call this port. This makes TrueFoundry load-bearing: remove it and there is no model access, no PHI redaction, no audit trail, and no cost accounting.",
+    "keys_needed": [
+      "TRUEFOUNDRY_API_KEY",
+      "TRUEFOUNDRY_BASE_URL (control-plane / gateway host, e.g. https://<tenant>.truefoundry.cloud or https://llm-gateway.truefoundry.com)",
+      "TRUEFOUNDRY_DEFAULT_MODEL (gateway model id, e.g. 'openai-main/gpt-4o-mini' or 'minimax/abab6.5s' \u2014 the provider-account/model-name slug configured in the TFY gateway)",
+      "TFY_MODE (real|sim, selects adapter at the composition root)",
+      "TFY_TENANT (optional, used to build base_url and X-TFY-* metadata)"
+    ],
+    "real_api": {
+      "base_url": "https://llm-gateway.truefoundry.com  (SaaS shared gateway)  OR  https://<tenant>.truefoundry.cloud  (dedicated control plane). The OpenAI-compatible inference path is appended to this host.",
+      "auth_scheme": "Bearer token. HTTP header 'Authorization: Bearer $TRUEFOUNDRY_API_KEY'. The key is a TrueFoundry Virtual Account / Personal Access Token minted in the TFY dashboard (Settings -> API Keys / Virtual Accounts). The same key authorizes inference, carries the gateway's per-key rate-limit + cost budget config, and ties usage to the metering/cost dashboard. No separate signing.",
+      "sdk_or_lib": "Primary: the OpenAI Python SDK pointed at the TFY gateway -> openai.OpenAI(base_url='<base>/api/inference/openai', api_key=TRUEFOUNDRY_API_KEY). TrueFoundry's gateway is wire-compatible with the OpenAI Chat Completions schema, so client.chat.completions.create(model='<provider-account>/<model>', messages=[...]) works unchanged. Alternative: the 'truefoundry' / 'servicefoundry' Python package (truefoundry.ml / TrueFoundry SDK) for control-plane ops, and plain httpx/requests POST for environments where the OpenAI SDK is undesirable. Tracing/audit can additionally be emitted via OpenTelemetry/Traceloop to the TFY tracing collector, but Backstop keeps its OWN local hash-chained audit as source of truth.",
+      "endpoints": [
+        {
+          "name": "chat_completions",
+          "method": "POST",
+          "path": "/api/inference/openai/chat/completions",
+          "purpose": "The one call we use. OpenAI-compatible chat completion routed through the gateway to whatever upstream provider the model slug maps to.",
+          "request_headers": {
+            "Authorization": "Bearer $TRUEFOUNDRY_API_KEY",
+            "Content-Type": "application/json",
+            "X-TFY-METADATA": "optional JSON string of trace metadata, e.g. {\"appeal_id\":\"<uuid>\",\"stage\":\"compose_line\",\"tenant\":\"backstop\"} \u2014 the gateway attaches this to the request's trace/metering row so cost + audit can be filtered per appeal in the TFY dashboard"
+          },
+          "request_body": {
+            "model": "openai-main/gpt-4o-mini  (provider-account-name/model-name as configured in the gateway)",
+            "messages": [
+              {
+                "role": "system",
+                "content": "..."
+              },
+              {
+                "role": "user",
+                "content": "...REDACTED prompt..."
+              }
+            ],
+            "temperature": 0.2,
+            "max_tokens": 800,
+            "stream": false
+          },
+          "response_body": {
+            "id": "chatcmpl-...",
+            "object": "chat.completion",
+            "model": "openai-main/gpt-4o-mini",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "...model text..."
+                },
+                "finish_reason": "stop"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 312,
+              "completion_tokens": 144,
+              "total_tokens": 456
+            }
+          },
+          "notes": "Non-streaming used for compose/draft (deterministic, easy to audit). Streaming variant (stream=true, SSE 'data:' chunks with choices[].delta.content) is available and would be used if we ever stream a spoken line token-by-token into Qwen TTS \u2014 the port exposes a separate streaming method for that."
+        },
+        {
+          "name": "models_list",
+          "method": "GET",
+          "path": "/api/inference/openai/models",
+          "purpose": "List the model slugs the API key is allowed to call. Used once at composition-root startup to fail fast if TRUEFOUNDRY_DEFAULT_MODEL is not authorized.",
+          "request_headers": {
+            "Authorization": "Bearer $TRUEFOUNDRY_API_KEY"
+          },
+          "response_body": {
+            "object": "list",
+            "data": [
+              {
+                "id": "openai-main/gpt-4o-mini",
+                "object": "model"
+              }
+            ]
+          },
+          "notes": "Health/preflight only; not on the hot path."
+        }
+      ],
+      "notes": "CONFIDENCE: HIGH on the shape (TrueFoundry's LLM Gateway is explicitly OpenAI-wire-compatible; the OpenAI SDK with base_url override + Bearer key + 'provider-account/model' slug is the documented integration). MEDIUM on the EXACT host + path string: TrueFoundry has shipped two surfaces over time \u2014 (a) the SaaS gateway host 'llm-gateway.truefoundry.com' and (b) a tenant control-plane host '<tenant>.truefoundry.cloud' \u2014 and the inference prefix has appeared as both '/api/inference/openai' and '/api/llm/...'. Because of this, BASE_URL and the inference path are CONFIGURABLE (env-driven), never hardcoded, and validated at startup via models_list. TrueFoundry's hosted PII/PHI Guardrails and the metering/cost dashboard exist as platform features, but Backstop does NOT depend on them being enabled in the sandbox: redaction, the tamper-evident audit chain, and the cost ledger are all computed LOCALLY in the adapter so the capability is real even against a bare OpenAI-compatible endpoint. The X-TFY-METADATA header is best-effort enrichment; if the gateway ignores it nothing breaks."
+    },
+    "port_name": "LLMGatewayPort",
+    "port_methods": [
+      {
+        "signature": "async def complete(self, request: LLMRequest) -> LLMResponse",
+        "purpose": "The single entry point for every non-streaming model call in Backstop. Implementations MUST (1) redact PHI from request.messages before any bytes leave the process, (2) send the redacted messages to the upstream model, (3) redact PHI from the completion text, (4) append a tamper-evident audit record, (5) price token usage into the cost ledger, and (6) return an LLMResponse whose .text and audit are PHI-free. request carries: messages: list[Message], stage: str (e.g. 'compose_line'|'synthesize_rebuttal'|'draft_letter'|'classify_denial'), appeal_id: str, model: str|None (override), temperature: float, max_tokens: int, metadata: dict."
+      },
+      {
+        "signature": "async def stream(self, request: LLMRequest) -> AsyncIterator[LLMChunk]",
+        "purpose": "Streaming variant for low-latency spoken-line composition feeding Qwen TTS. Same redaction-out contract; redaction-in is applied per-flushed-sentence (buffer until a sentence boundary, redact, then yield) so PHI never streams unredacted. Emits a final LLMChunk with usage + the closed audit record. Sim implementation streams its locally-generated line token-grouped to exercise consumers without an upstream."
+      },
+      {
+        "signature": "def health(self) -> GatewayHealth",
+        "purpose": "Preflight used by the composition root. Real adapter: GET models_list and assert TRUEFOUNDRY_DEFAULT_MODEL is present, return {mode:'real', reachable:bool, model_authorized:bool, base_url}. Sim adapter: returns {mode:'sim', reachable:True, model_authorized:True}. Lets server.py fail fast / surface real-vs-sim in the dashboard integration badge."
+      },
+      {
+        "signature": "def cost_to_date(self, appeal_id: str | None = None) -> CostSnapshot",
+        "purpose": "Read-through to the cost ledger fed by complete()/stream(). Returns {prompt_tokens, completion_tokens, usd, n_calls} optionally scoped to one appeal. Used by the recoverable-$ x SOL triage worklist and the per-appeal evidence timeline. Keeps the cost ledger a first-class output of the gateway, not a side-effect buried in the adapter."
+      }
+    ],
+    "real_adapter": "TrueFoundryGatewayAdapter implements LLMGatewayPort. Constructed by the composition root with three INJECTED collaborators (so the adapter has exactly one job \u2014 talk to the gateway): a RedactionPort (the local PHI redactor \u2014 same instance the sim uses), an AuditPort (the hash-chained audit sink), and a CostLedgerPort (the priced-usage sink). complete() flow: (1) redacted_msgs = redactor.redact_messages(req.messages) \u2014 strips/masks member IDs, NPIs, SSNs, claim numbers, DOBs, names, addresses, phone numbers via the shared regex+context ruleset, returning masked text plus a map of placeholders->salted-hashes (never the raw PHI); (2) build OpenAI-shape body {model: req.model or DEFAULT_MODEL, messages: redacted_msgs, temperature, max_tokens, stream:false} and POST to f'{base_url}{INFERENCE_PATH}/chat/completions' with Authorization: Bearer + X-TFY-METADATA={appeal_id, stage}; uses an httpx.AsyncClient with explicit timeout (connect 5s / read 30s), a bounded retry (3x ex\u043f backoff on 429/5xx only, honoring Retry-After), and raises GatewayError on non-2xx (never silently degrades); (3) text = redactor.redact_text(choice.message.content) \u2014 defense-in-depth in case the model echoed an un-stripped identifier; (4) usage -> cost: cost = ledger.record(appeal_id, stage, model, usage.prompt_tokens, usage.completion_tokens) using a per-model price table (USD/1K tokens) loaded from config; (5) audit.append(AuditRecord{ts, appeal_id, stage, model, mode:'real', prompt_sha256, completion_sha256, redaction_count, prompt_tokens, completion_tokens, usd, gateway_request_id}) \u2014 record stores HASHES of the redacted prompt/completion, not the text, and is hash-chained to the prior record (prev_hash) so tampering is detectable; (6) return LLMResponse{text, usage, cost_usd, audit_id, model, mode:'real'}. The adapter NEVER logs raw messages, never writes PHI to disk, and surfaces the real/sim flag. stream() mirrors this over SSE with per-sentence redaction buffering. Keys come only from env via a Settings object; no secret literals.",
+    "sim_adapter": "SimGatewayAdapter implements LLMGatewayPort and does GENUINE local work \u2014 it is NOT an echo. It is injected with the SAME RedactionPort, AuditPort, and CostLedgerPort instances as the real adapter, so redaction, the tamper-evident hash-chained audit, and the priced cost ledger are 100% real in sim mode; ONLY the upstream model proxy is stubbed. complete() flow: (1) run the real redactor over the messages (real redaction, real placeholder map); (2) generate a completion with a LocalCompletionEngine \u2014 a deterministic, seeded, template+retrieval composer that produces a plausible stage-appropriate output: for stage='compose_line' it fills a spoken-rebuttal template from the (already-redacted) call context; for 'synthesize_rebuttal'/'classify_denial' it does a small local TF-IDF/keyword match against data/runbooks denial-reason patterns to pick the rebuttal skeleton (sharing Moss's sim corpus path), for 'draft_letter' it assembles the structured appeal sections. Output is grammatical and varies with input, never a verbatim echo of the prompt; (3) re-redact the generated text through the real redactor; (4) compute REAL token usage with a local tokenizer estimate (e.g. tiktoken if available, else a deterministic word/4 heuristic) and feed REAL priced cost into the same ledger using the same price table (so sim and real are comparable on the dashboard); (5) append a REAL hash-chained audit record with mode:'sim'; (6) return LLMResponse{text, usage, cost_usd, audit_id, mode:'sim'}. Determinism: seeded by hash(appeal_id+stage+message_hashes) so tests are reproducible. stream() yields the locally-composed line in token groups with the same per-sentence redaction. This means every feature that depends on redaction/audit/cost works identically offline, and the only thing you lose in sim is upstream model quality \u2014 exactly the honesty contract.",
+    "wiring": "Composition root (orchestrator/backstop/composition.py / DI container): reads Settings, instantiates ONE shared LocalRedactionAdapter (RedactionPort), ONE HashChainAuditAdapter (AuditPort, append-only file or sqlite), ONE CostLedgerAdapter (CostLedgerPort). If TFY_MODE=='real' it builds TrueFoundryGatewayAdapter(redactor, audit, ledger, settings); else SimGatewayAdapter(redactor, audit, ledger, settings). The resulting LLMGatewayPort is injected into every service that needs a model \u2014 these services NEVER import an LLM SDK. Invocation points in the pipeline: (1) call.py / the per-turn PAVO loop \u2014 after PAVO's masked router (pavo/router.py, unchanged, ALWAYS real) selects a profile, the turn's reasoning + spoken-line composition for MiniMax-tier work calls gateway.complete(stage='classify_denial') and gateway.stream(stage='compose_line'); the composed line then goes to Qwen TTS. PAVO decides WHICH path; the gateway is HOW the model is reached, so the two are orthogonal and PAVO policy is untouched. (2) reconcile.py \u2014 gateway.complete(stage='synthesize_rebuttal') turns the contradiction found between the denial (Unsiloed-parsed EOB) and the Moss-retrieved runbook into the rebuttal argument. (3) letter.py \u2014 gateway.complete(stage='draft_letter') produces the verbatim appeal-letter body BEFORE reportlab renders the PDF, so the text the nurse signs was redaction-checked and audited. (4) swarm.py \u2014 passes appeal_id into every LLMRequest so audit + cost are per-appeal; the swarm's AWS/Semaphore concurrency cap bounds gateway calls. (5) server.py \u2014 at startup calls gateway.health() to set the TrueFoundry integration badge real/sim; the nurse review-queue + evidence-timeline endpoints read gateway.cost_to_date(appeal_id) and the audit chain to render the per-appeal cost and tamper-evident model-call timeline; the cryptographic sign-off gate verifies the audit chain is intact before allowing a signature. Net: TrueFoundry sits on the wire of every LLM byte in Backstop.",
+    "tests": [
+      {
+        "name": "test_port_contract_complete_redacts_outbound",
+        "kind": "contract (run against BOTH adapters parameterized)",
+        "asserts": "Given messages containing synthetic PHI (member id 'W123456789', NPI '1568463157', DOB '01/02/1980', name 'Jane Doe'), the transport sees ZERO raw PHI tokens. For the real adapter a fake httpx transport captures the outbound body and asserts the regexes find no PHI; for sim the LocalCompletionEngine input is asserted PHI-free. Same test, both adapters -> proves the port's redaction contract."
+      },
+      {
+        "name": "test_port_contract_complete_redacts_inbound",
+        "kind": "contract (both adapters)",
+        "asserts": "When the upstream (faked for real, generated for sim) returns text that re-introduces a member id, response.text contains no raw PHI \u2014 defense-in-depth re-redaction runs."
+      },
+      {
+        "name": "test_audit_chain_is_tamper_evident",
+        "kind": "unit (AuditPort) + contract",
+        "asserts": "After N complete() calls each record's prev_hash == sha256 of the prior record; flipping any field and re-verifying fails verify_chain(); records store hashes not raw text; mode field is 'real'/'sim' correctly. Sign-off gate test: verify_chain() must be True before sign_off() succeeds, raises on a broken chain."
+      },
+      {
+        "name": "test_cost_ledger_prices_usage",
+        "kind": "unit (CostLedgerPort) + contract",
+        "asserts": "Given usage {prompt_tokens:1000, completion_tokens:500} and price table {model: in=0.15, out=0.60 per 1K}, recorded usd == 0.15*1 + 0.60*0.5 == 0.45; cost_to_date(appeal_id) sums only that appeal; n_calls increments; sim and real use the SAME table so numbers are comparable."
+      },
+      {
+        "name": "test_sim_is_not_an_echo",
+        "kind": "unit (SimGatewayAdapter)",
+        "asserts": "For stage='compose_line', response.text is NOT a substring/echo of the prompt, is non-empty, is grammatical-template output, and CHANGES when the input call-context changes; for stage='synthesize_rebuttal' the local TF-IDF picks the correct rebuttal skeleton for a known denial reason in data/runbooks. Determinism: same (appeal_id,stage,messages) -> identical output across two calls."
+      },
+      {
+        "name": "test_sim_token_count_and_cost_are_real",
+        "kind": "unit (SimGatewayAdapter)",
+        "asserts": "response.usage.completion_tokens > 0 and tracks output length; cost_usd > 0 and equals ledger.record(...) for the same usage \u2014 i.e. cost is computed, not faked/zero."
+      },
+      {
+        "name": "test_real_adapter_request_shape_and_auth",
+        "kind": "unit (TrueFoundryGatewayAdapter with mocked httpx.AsyncClient)",
+        "asserts": "Outbound request: method POST, url endswith '/chat/completions', header Authorization=='Bearer <key>', body.model==DEFAULT_MODEL, body.stream==False, X-TFY-METADATA JSON contains appeal_id+stage. Response parsing: usage + choices[0].message.content mapped into LLMResponse."
+      },
+      {
+        "name": "test_real_adapter_retries_and_errors",
+        "kind": "unit (mocked transport)",
+        "asserts": "429 then 200 -> retried once and succeeds (honors Retry-After); persistent 500 -> raises GatewayError after bounded retries, never returns a partial/echo; 4xx auth error -> raises immediately without retry; on any error NO audit/cost record claiming success is written."
+      },
+      {
+        "name": "test_health_preflight",
+        "kind": "unit (both)",
+        "asserts": "real health(): with models_list returning DEFAULT_MODEL -> model_authorized True; missing -> False, reachable still True. sim health(): mode=='sim', reachable True. Used to assert the dashboard badge logic."
+      },
+      {
+        "name": "test_stream_redacts_per_sentence",
+        "kind": "contract (both)",
+        "asserts": "Concatenated streamed chunks contain no raw PHI; no chunk is flushed mid-PHI-token (buffer-until-sentence-boundary holds); final chunk carries usage + a closed audit record whose chain verifies."
+      },
+      {
+        "name": "test_services_only_depend_on_port",
+        "kind": "architecture/guard unit",
+        "asserts": "Static check: reconcile.py, letter.py, call.py, swarm.py import LLMGatewayPort (or receive it via DI) and do NOT import openai/httpx/minimax SDKs directly \u2014 enforces the single-chokepoint invariant."
+      },
+      {
+        "name": "test_di_selects_adapter_by_mode",
+        "kind": "unit (composition root)",
+        "asserts": "TFY_MODE=='sim' builds SimGatewayAdapter; =='real' builds TrueFoundryGatewayAdapter; both receive the SAME redactor/audit/ledger singletons (identity check) so sim and real share real local work."
+      }
+    ]
+  },
+  {
+    "sponsor": "Unsiloed",
+    "capability": "Document understanding: turn a denial artifact (EOB / CMS-1500 / UB-04 / 835 ERA / 277CA) \u2014 uploaded as PDF or scanned image, OR as raw EDI text \u2014 into a structured, provenance-bearing Denial object (payer, member/subscriber ID, claim number, NPI, DOS, billed/allowed/paid, CARC/RARC denial codes, denial reason text, service lines), with per-field confidence and source bounding boxes so every extracted value is auditable. This is the FIRST stage of the Backstop pipeline: nothing downstream (Moss retrieval, MiniMax reasoning, letter.py) can run without a trustworthy Denial. The sim adapter performs REAL deterministic parsing (EDI X12 segment parsing for 835/837/277; regex+layout heuristics for EOB/CMS-1500/UB-04 text), not an echo.",
+    "keys_needed": [
+      "UNSILOED_API_KEY"
+    ],
+    "real_api": {
+      "base_url": "https://prod.visionapi.unsiloed.ai",
+      "auth_scheme": "API key in custom header: `api-key: <UNSILOED_API_KEY>`. NOT Bearer. The same header is sent on both the create-job POST and the GET poll. The brief's `api.unsiloed.ai` is the docs/marketing host; the live API host is prod.visionapi.unsiloed.ai (verified from the published curl examples). Make the host an env-overridable constant UNSILOED_BASE_URL defaulting to https://prod.visionapi.unsiloed.ai so it can be repointed without a code change.",
+      "endpoints": [
+        {
+          "name": "create_extract_job",
+          "method": "POST",
+          "path": "/v2/extract",
+          "content_type": "multipart/form-data",
+          "purpose": "PRIMARY load-bearing endpoint. Pull typed Denial fields out of the document using a JSON Schema. This is what maps an EOB/CMS-1500/UB-04 image-or-PDF straight to Denial fields in one shot.",
+          "request_fields": {
+            "file": "binary (one of file|url required) \u2014 the denial PDF/PNG/JPEG/TIFF/DOCX/XLSX bytes",
+            "url": "string (alternative to file) \u2014 presigned/public URL to the artifact",
+            "schema_data": "string \u2014 STRINGIFIED JSON Schema describing the Denial fields to extract (type/properties/required). This is how we pin the output to our Denial shape.",
+            "page_range": "string optional e.g. '1-3'"
+          },
+          "response_201": {
+            "job_id": "string",
+            "status": "string (e.g. Processing)",
+            "message": "string",
+            "quota_remaining": "number"
+          }
+        },
+        {
+          "name": "get_extract_result",
+          "method": "GET",
+          "path": "/extract/{job_id}",
+          "purpose": "Poll until terminal. NOTE the asymmetry: create is POST /v2/extract but the poll path is GET /extract/{job_id} (no v2). On Succeeded the body is a flat map of {field_name: {value, score, bboxes[], page_no}} plus a top-level min_confidence_score.",
+          "response_complete": {
+            "<field_name>": {
+              "value": "string|number|array|object",
+              "score": "number 0..1 per-field confidence",
+              "bboxes": [
+                {
+                  "bbox": "[left,top,right,bottom]",
+                  "text": "string",
+                  "confidence": "number",
+                  "page_width": "number",
+                  "page_height": "number"
+                }
+              ],
+              "page_no": "number"
+            },
+            "min_confidence_score": "number \u2014 overall floor across fields; use as the gate for human-in-the-loop"
+          }
+        },
+        {
+          "name": "create_parse_job",
+          "method": "POST",
+          "path": "/parse",
+          "content_type": "multipart/form-data",
+          "purpose": "SECONDARY. When extract isn't enough (unusual layout, need the full document as ordered Markdown chunks for Moss retrieval / evidence timeline), parse returns ordered layout segments with bbox+OCR. Used as fallback and to feed the per-appeal evidence timeline.",
+          "request_fields": {
+            "file": "binary (one of file|url)",
+            "url": "string",
+            "use_high_resolution": "boolean default true",
+            "ocr_strategy": "string default 'auto_detection'",
+            "page_range": "string optional"
+          },
+          "response_201": {
+            "job_id": "string",
+            "status": "string",
+            "file_name": "string",
+            "created_at": "ISO8601",
+            "credit_used": "integer",
+            "quota_remaining": "integer"
+          }
+        },
+        {
+          "name": "get_parse_result",
+          "method": "GET",
+          "path": "/parse/{job_id}",
+          "purpose": "Poll parse job. On Succeeded returns chunks[].segments[] each with {segment_type, content, markdown, html, page_number, confidence, bbox{left,top,width,height}, ocr[]}.",
+          "response_complete": {
+            "job_id": "string",
+            "status": "Succeeded|Failed|Processing",
+            "total_chunks": "integer",
+            "chunks": [
+              {
+                "segments": [
+                  {
+                    "segment_type": "string",
+                    "content": "string",
+                    "markdown": "string",
+                    "page_number": "integer",
+                    "confidence": "number",
+                    "bbox": {
+                      "left": "number",
+                      "top": "number",
+                      "width": "number",
+                      "height": "number"
+                    },
+                    "ocr": [
+                      {
+                        "text": "string",
+                        "confidence": "number",
+                        "bbox": {
+                          "left": "number",
+                          "top": "number",
+                          "width": "number",
+                          "height": "number"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "notes": "VERIFIED against docs.unsiloed.ai (June 2026): base host prod.visionapi.unsiloed.ai, header `api-key`, async job model (POST create -> GET poll). Two asymmetries to encode carefully: (1) create extract is POST /v2/extract but poll is GET /extract/{job_id} (no v2); parse is symmetric /parse + /parse/{job_id}. (2) extract result is a FLAT field-map (no wrapper), parse result is chunked. UNCERTAIN / most-likely-contract items, flagged honestly: exact status string casing ('Succeeded' vs 'succeeded'), whether 201 vs 200 on create, and whether very large EDI .txt (835/837) is accepted by /parse (docs list PDF/image/office formats, NOT raw .edi/.txt). DESIGN CONSEQUENCE: raw EDI X12 (835/837/277) is NOT sent to Unsiloed at all \u2014 it is handled entirely by the sim/deterministic EDI adapter, which is correct work, not an echo. Unsiloed is used only for the image/PDF artifacts (EOB scans, CMS-1500/UB-04 paper forms) where vision parsing genuinely earns its keep. No official Python SDK is published; call via httpx.AsyncClient. PHI: file bytes are synthetic in this build (honesty contract); even so, route the Unsiloed call through the TrueFoundry audit/redaction port boundary so production PHI is logged/redacted, never the raw key or member ID in plaintext logs."
+    },
+    "port_name": "DenialParserPort",
+    "port_methods": [
+      {
+        "signature": "async def parse(self, artifact: ParseRequest) -> DenialExtraction",
+        "purpose": "The single capability the port hides: given a denial artifact (bytes+mime OR raw EDI text OR url) plus a declared artifact_kind, return a fully-populated DenialExtraction (the structured Denial fields + per-field ExtractedField provenance). Both adapters MUST return the identical DenialExtraction shape; that shared shape is the contract the contract-tests assert. One responsibility per file: this file defines ONLY the abstract interface + the request/result dataclasses it speaks in."
+      },
+      {
+        "signature": "def supports(self, kind: ArtifactKind) -> bool",
+        "purpose": "Capability probe used by the composition root / router to pick an adapter per artifact. Real Unsiloed adapter returns True for EOB_IMAGE, CMS1500_IMAGE, UB04_IMAGE, PDF; False for raw EDI (EDI_835/837/277). Sim adapter returns True for ALL kinds (it is the universal fallback). Lets the service degrade gracefully and lets EDI always go to the deterministic parser."
+      }
+    ],
+    "real_adapter": "UnsiloedDenialParserAdapter (integrations/unsiloed.py, mode='real'). Implements DenialParserPort using httpx.AsyncClient against https://prod.visionapi.unsiloed.ai. parse() flow: (1) refuse raw-EDI kinds (raise UnsupportedArtifact so the service falls back to sim \u2014 keeps the EDI path deterministic); (2) build a Denial JSON Schema (the canonical field set: payer_name, payer_id, member_id, subscriber_id, claim_number, billing_npi, rendering_npi, date_of_service, billed_amount, allowed_amount, paid_amount, carc_codes[], rarc_codes[], denial_reason, service_lines[]) and json.dumps it into the schema_data form field; (3) POST /v2/extract as multipart (file bytes + schema_data), reading `api-key` from injected config \u2014 never hard-coded; (4) poll GET /extract/{job_id} with capped exponential backoff (base 0.5s, cap ~30s total, bounded retries) until status terminal \u2014 handles the async job model the brief's current sync echo ignores; (5) map the flat field-map response into DenialExtraction: each {value, score, bboxes, page_no} becomes an ExtractedField(value, confidence=score, source_bbox, source_page, source_text), and top-level min_confidence_score becomes DenialExtraction.overall_confidence; (6) set needs_human_review = overall_confidence < config.confidence_floor (default 0.85) \u2014 this is the substrate hook for the nurse review queue / sign-off gate. Cross-cutting concerns are NOT in this file: the httpx client, api-key, base_url, timeouts, and confidence_floor are all constructor-injected (DI); the TrueFoundry audit/redaction and the AWS concurrency semaphore are applied by the SERVICE wrapping the port, not inside the adapter (single responsibility). Errors normalized to typed exceptions (UnsiloedAuthError, UnsiloedTimeout, UnsiloedJobFailed, UnsupportedArtifact) so the service can fall back to sim deterministically. Note this fixes the audited 'arbitrary file read in EOB parse' Critical: the adapter only ever ships in-memory bytes the controller already validated, it never opens a server-side path from user input.",
+    "sim_adapter": "DeterministicDenialParserAdapter (integrations/unsiloed.py, mode='sim' \u2014 or a sibling file unsiloed_sim.py to honor one-responsibility). REAL local work, never an echo. Two genuine engines behind the same DenialParserPort: (A) EDI X12 parser for EDI_835 (ERA) / EDI_837 / EDI_277CA \u2014 splits on segment terminator (~) and element separator (*), walks ISA/GS/ST envelopes, and reads the real X12 segments: CLP (claim payment: claim#, status, billed/paid/patient-resp), NM1 (entity names + NPI in NM109), DTM (dates incl. DOS qualifier 472), CAS (claim adjustment: maps group code + CARC reason code + amount \u2014 THE denial codes), MIA/MOA (RARC remark codes), SVC/SV1/SV2 (service lines + HCPCS/CPT). It emits the same Denial fields with confidence=1.0 for cleanly parsed segments (deterministic = certain) and source_text = the literal segment string for the evidence timeline. (B) Text/layout heuristic parser for EOB/CMS-1500/UB-04 supplied as text or pre-OCR'd: anchored regexes over the canonical paper-form box geometry (CMS-1500 box 24/33a NPI, UB-04 form locators, EOB 'reason code' columns) plus a CARC/RARC code table lookup to expand a bare code like CO-197 into its standard reason text ('Precertification/authorization absent'). Confidence is heuristic (0.6\u20130.9) so needs_human_review trips appropriately, exercising the same gate the real path uses. This is the EXISTING deterministic parser the brief points to, lifted behind the port intact \u2014 it is load-bearing in production for every EDI artifact (Unsiloed is image-only), and serves as the test double for contract tests. It depends on a small in-repo carc_table.py / data/runbooks code map, nothing external \u2014 fully offline and deterministic.",
+    "wiring": "Pipeline position: STAGE 0 (ingestion), upstream of everything. Controller -> Service -> DenialParserPort -> Adapter. (1) Controller: server.py POST /appeals (single) and POST /batch (the NOW-feature batch backlog ingestion of 835/837/277 + EOB images) accept the upload, enforce size/mime validation (fixes 'unbounded uploads'), and hand in-memory bytes + declared ArtifactKind to the service \u2014 never a filesystem path (fixes 'arbitrary file read'). (2) Service: IngestDenialService (services/ingest_denial.py) is the use-case. It calls port.supports(kind) to choose the adapter via the injected registry, wraps the port call in (a) the AWS concurrency-cap port (asyncio.Semaphore sim / elastic burst real \u2014 fixes 'no concurrency cap' + 'threadpool starvation') and (b) the TrueFoundry audit+redaction port so the Unsiloed request/response is redacted-logged for audit (fixes 'PHI streamed unredacted' at the boundary). On UnsupportedArtifact/Unsiloed* errors it falls back to the deterministic sim adapter \u2014 so EDI always parses and an Unsiloed outage never blocks a denial. (3) Output: the returned DenialExtraction is persisted (replacing the unbounded global APPEALS dict with a bounded/TTL store \u2014 fixes OOM) and becomes the seed Denial for swarm.py. Downstream consumers of the SAME DenialExtraction: Moss (retrieval keyed on carc/rarc + denial_reason), MiniMax (reasoning over the contradiction), letter.py (verbatim fields with provenance), and the nurse review queue (needs_human_review + per-field source_bbox/source_text drive the evidence timeline and the cryptographic sign-off gate). Composition root (app/container.py) constructs ONE adapter instance per mode from env (UNSILOED_API_KEY present + UNSILOED_MODE=real -> real, else sim) and injects it; nothing in the pipeline imports the adapter concretely \u2014 they depend on DenialParserPort only.",
+    "tests": [
+      {
+        "name": "test_port_contract_shared",
+        "type": "contract",
+        "gated": "green-before-proceed",
+        "desc": "Parametrized over BOTH adapters (real-against-mocked-httpx AND sim) through the DenialParserPort interface. Asserts every adapter returns a DenialExtraction with the full required field set populated, each ExtractedField has value+confidence in [0,1]+source provenance, overall_confidence in [0,1], and needs_human_review is bool. This is the load-bearing 'each adapter tested against the port' test; sim is the reference double."
+      },
+      {
+        "name": "test_sim_edi_835_real_parse",
+        "type": "unit",
+        "desc": "Feed a real synthetic 835 ERA string with CLP/CAS/NM1/DTM/MIA segments (CO-197 denial). Assert claim_number from CLP01, billed/paid from CLP03/04, carc_codes==['197'] from CAS, rarc from MIA/MOA, billing_npi from NM1*...*XX*<npi>, date_of_service from DTM*472. Proves the sim does REAL X12 work, not an echo. confidence==1.0, source_text==literal segment."
+      },
+      {
+        "name": "test_sim_eob_text_regex",
+        "type": "unit",
+        "desc": "Feed synthetic EOB text with a 'Reason Code: CO-45' column and member/claim boxes. Assert carc_codes extracted, denial_reason expanded via CARC table, member_id/claim_number captured, confidence in [0.6,0.9], needs_human_review True when below floor."
+      },
+      {
+        "name": "test_sim_carc_table_expansion",
+        "type": "unit",
+        "desc": "Unit-test the carc_table lookup in isolation: 'CO-197'->'Precertification/authorization absent', unknown code -> graceful 'Unmapped code' + lowered confidence. One-responsibility module test."
+      },
+      {
+        "name": "test_real_extract_happy_path_mocked",
+        "type": "unit",
+        "desc": "Mock httpx: POST /v2/extract returns {job_id,status:Processing}; GET /extract/{job_id} returns Processing then a flat field-map with min_confidence_score. Assert adapter sends header api-key=<key>, sends schema_data as stringified JSON Schema with the Denial fields, polls until terminal, and maps field-map -> DenialExtraction (score->confidence, bboxes->source_bbox, min_confidence_score->overall_confidence). Verifies the async job model + asymmetric POST /v2/extract vs GET /extract path."
+      },
+      {
+        "name": "test_real_refuses_edi_falls_back",
+        "type": "unit",
+        "desc": "real_adapter.supports(EDI_835) is False and parse(edi) raises UnsupportedArtifact; assert the IngestDenialService catches it and routes to the sim adapter, yielding a populated DenialExtraction. Proves EDI never hits the network and the fallback is deterministic."
+      },
+      {
+        "name": "test_real_auth_and_failure_normalization",
+        "type": "unit",
+        "desc": "Mock 401 -> UnsiloedAuthError; job status Failed -> UnsiloedJobFailed; poll timeout -> UnsiloedTimeout. Assert no api-key or member_id appears in any log record (PHI/secret leak guard) and that the service falls back to sim on each."
+      },
+      {
+        "name": "test_confidence_gate_triggers_review",
+        "type": "unit",
+        "desc": "Construct DenialExtraction with overall_confidence below config.confidence_floor (0.85) -> needs_human_review True; above -> False. This is the substrate test for the nurse review queue / sign-off gate, asserted identically across both adapters."
+      },
+      {
+        "name": "test_service_concurrency_and_audit_wrapping",
+        "type": "integration",
+        "desc": "IngestDenialService with sim adapter + AWS-semaphore port (cap=2) + TrueFoundry audit port (spy). Fire N>cap concurrent ingests; assert never more than 2 in flight (concurrency cap honored) and that the audit port received a redacted record per call (no raw PHI). Locks in the cross-cutting wiring outside the adapter."
+      }
+    ]
+  },
+  {
+    "sponsor": "MiniMax",
+    "capability": "Mid-tier reasoning. Two grounded use-cases, both routed to here when PAVO picks the hybrid/mid tier: (1) COMPOSE the agent's next spoken line during a live payer call \u2014 a single short, grounded, audit-safe utterance built strictly from retrieved runbook/policy evidence (Moss) + structured call state (denial, claim, IVR position, last payer utterance); (2) INTERPRET an ambiguous free-text denial reason / payer rep utterance into a structured object (canonical denial category, CARC/RARC mapping, the specific contradiction/rebuttal hook to pursue, recommended next dialog act). Output is always grounded in supplied evidence with explicit citations and is forbidden from inventing PHI or clinical facts. This is the reasoning brain between retrieval (Moss) and speech (Qwen TTS / LiveKit transport); PAVO decides whether a turn even reaches MiniMax vs. an on-device line.",
+    "keys_needed": [
+      "MINIMAX_API_KEY",
+      "MINIMAX_GROUP_ID",
+      "MINIMAX_BASE_URL",
+      "MINIMAX_MODEL",
+      "MINIMAX_MODE"
+    ],
+    "real_api": {
+      "base_url": "https://api.minimax.io/v1",
+      "auth_scheme": "Bearer token in HTTP header: `Authorization: Bearer ${MINIMAX_API_KEY}`. The MiniMax-native endpoint additionally scopes the account via a GroupId passed as a query parameter (`?GroupId=${MINIMAX_GROUP_ID}`). The OpenAI-compatible endpoint does NOT require GroupId. We target the native endpoint to keep GroupId scoping + native `base_resp` error envelope, and keep the OpenAI-compatible path as a fallback transport. Content-Type: application/json.",
+      "sdk_or_lib": "No official Python SDK needed; call REST directly with `httpx.AsyncClient` (async, required because the swarm is asyncio-concurrent \u2014 must NOT use the blocking `openai` client in the event loop). MiniMax is OpenAI-API-compatible, so the official `openai` AsyncOpenAI client also works against base_url `https://api.minimax.io/v1` with the OpenAI-compatible route \u2014 but we standardize on raw httpx so the adapter owns timeouts, retries, and the native `base_resp` status handling. Pin httpx>=0.27.",
+      "endpoints": [
+        {
+          "name": "chat completions (native)",
+          "method": "POST",
+          "path": "/v1/text/chatcompletion_v2?GroupId=${MINIMAX_GROUP_ID}",
+          "purpose": "Primary call for both compose-line and interpret-denial. Native MiniMax route; returns the `base_resp{status_code,status_msg}` envelope plus OpenAI-shaped `choices`.",
+          "request_body": {
+            "model": "MiniMax-M2.1 (configurable via MINIMAX_MODEL; M2.1-highspeed for the latency-sensitive live-call compose path, M3 for harder interpret-denial reasoning)",
+            "messages": "[{role: 'system', content: <grounded-NLG contract + guardrails>}, {role: 'user', content: <serialized evidence + call_state + task instruction>}]",
+            "temperature": "0.2 for compose (deterministic, low-hallucination), 0.1 for interpret (classification)",
+            "max_completion_tokens": "120 for compose (one spoken line), 400 for interpret (structured JSON)",
+            "top_p": 0.9,
+            "stream": false,
+            "response_format": "for interpret-denial we request JSON object output and also validate/parse defensively (MiniMax JSON-mode support varies by model; do not rely on it \u2014 parse + schema-validate the content string)"
+          },
+          "response_body": {
+            "id": "string",
+            "object": "chat.completion",
+            "created": "int unix ts",
+            "model": "string",
+            "choices": "[{index:int, finish_reason:'stop'|'length'|'content_filter'|'tool_calls', message:{role:'assistant', content:'<text or JSON string>'}}]",
+            "usage": "{prompt_tokens:int, completion_tokens:int, total_tokens:int}",
+            "base_resp": "{status_code:int (0 == success), status_msg:str}",
+            "input_sensitive": "bool",
+            "output_sensitive": "bool (content_filter signal)"
+          }
+        },
+        {
+          "name": "chat completions (OpenAI-compatible fallback)",
+          "method": "POST",
+          "path": "/v1/chat/completions",
+          "purpose": "Drop-in fallback transport if the native route is unavailable; identical OpenAI request/response shape but no `base_resp` envelope and no GroupId query param. Adapter selects route by config flag MINIMAX_ROUTE=native|openai.",
+          "request_body": {
+            "model": "MiniMax-M2.1",
+            "messages": "same as native",
+            "temperature": "same",
+            "max_completion_tokens": "same"
+          },
+          "response_body": {
+            "choices": "[{index, finish_reason, message:{role, content}}]",
+            "usage": "{prompt_tokens, completion_tokens, total_tokens}"
+          }
+        }
+      ],
+      "notes": "VERIFIED against MiniMax platform docs (platform.minimax.io). Confirmed: base https://api.minimax.io/v1; Bearer-token auth; native chat route is POST /v1/text/chatcompletion_v2 requiring ?GroupId=...; OpenAI-compatible route is POST /v1/chat/completions. Response carries OpenAI-shaped choices[].message.content + usage{prompt_tokens,completion_tokens,total_tokens}; native route adds base_resp{status_code,status_msg} where status_code==0 means success (NON-zero status_code can appear with HTTP 200 \u2014 the adapter MUST check base_resp.status_code, not just HTTP status). Model name param uses MiniMax model ids (MiniMax-M2 / M2.1 / M2.5 / M3 and *-highspeed variants); the older `abab*` ids are legacy. UNCERTAIN: exact current default model id and whether GroupId may also be sent as a header on the native route \u2014 pin via config (MINIMAX_MODEL, MINIMAX_GROUP_ID) and keep route selectable so a doc drift doesn't require code change. PHI POSTURE (load-bearing): every payload to MiniMax MUST be PHI-redacted FIRST by the TrueFoundry redaction port; MiniMax receives only de-identified tokens (member-id/NPI/name -> stable pseudonyms), and TrueFoundry also meters the call for cost/audit. MiniMax is therefore never a PHI sink."
+    },
+    "port_name": "ReasoningPort",
+    "port_methods": [
+      {
+        "name": "compose_line",
+        "signature": "async def compose_line(self, req: ComposeLineRequest) -> ComposeLineResult",
+        "purpose": "Produce ONE grounded spoken line for the agent's next turn, built strictly from req.evidence (retrieved Moss runbook/policy snippets, each with a citation id) + req.call_state (denial summary, claim facts, IVR position, last_payer_utterance, dialog goal). Returns the utterance text, the list of citation ids it relied on, a dialog_act label (e.g. 'state_contradiction','request_reference_number','cite_policy','ask_clarification'), and a grounded:bool / confidence score. MUST refuse (grounded=False + safe fallback line) if evidence is insufficient rather than invent facts.",
+        "request_shape": "ComposeLineRequest{ evidence: list[EvidenceSnippet(id:str, source:str, text:str, score:float)], call_state: CallState(denial_code:str|None, denial_reason:str, claim_facts:dict, ivr_position:str, last_payer_utterance:str|None, dialog_goal:str), max_words:int=40, locale:str='en-US' }",
+        "result_shape": "ComposeLineResult{ line:str, dialog_act:str, citations:list[str], grounded:bool, confidence:float, model:str, tokens:TokenUsage, adapter:str('minimax-real'|'minimax-sim') }"
+      },
+      {
+        "name": "interpret_denial",
+        "signature": "async def interpret_denial(self, req: InterpretDenialRequest) -> DenialInterpretation",
+        "purpose": "Turn an ambiguous free-text denial reason or live payer-rep utterance into a structured, actionable object: canonical denial category, mapped CARC/RARC code(s), the specific contradiction/rebuttal hook to pursue (grounded in supplied evidence), recommended routing (appeal | resubmit | peer_to_peer | request_records), and the next dialog act. Grounded in req.evidence; flags ambiguity when the text underdetermines the category.",
+        "request_shape": "InterpretDenialRequest{ denial_text:str, evidence:list[EvidenceSnippet], claim_facts:dict, known_codes:list[str]=[] }",
+        "result_shape": "DenialInterpretation{ category:str, carc_codes:list[str], rarc_codes:list[str], rebuttal_hook:str, recommended_route:str, next_dialog_act:str, citations:list[str], ambiguous:bool, confidence:float, model:str, tokens:TokenUsage, adapter:str }"
+      },
+      {
+        "name": "health",
+        "signature": "async def health(self) -> PortHealth",
+        "purpose": "Liveness/readiness probe used by the composition root and /health route; real adapter does a cheap auth-scoped ping (or cached short-TTL check), sim adapter returns ready=True with mode='sim'. Returns PortHealth{ready:bool, mode:str, detail:str}."
+      }
+    ],
+    "real_adapter": "File: orchestrator/backstop/adapters/minimax_real.py \u2014 class MiniMaxReasoningAdapter(ReasoningPort). ONE responsibility: translate ReasoningPort calls into MiniMax REST calls and back. Construction is pure DI: __init__(self, http: httpx.AsyncClient, settings: MiniMaxSettings, prompts: PromptBuilder, clock: Clock). It does NOT create its own client or read os.environ \u2014 the composition root injects a shared, connection-pooled httpx.AsyncClient (with timeouts) and a frozen MiniMaxSettings(api_key, group_id, base_url, model, route, compose_max_tokens, interpret_max_tokens, compose_temp, interpret_temp). Flow for compose_line/interpret_denial: (1) PromptBuilder renders the system contract + user payload from request dataclasses into the messages array \u2014 system message hard-codes the grounding contract ('use ONLY the numbered evidence; cite ids; never invent member data or clinical facts; if evidence is insufficient, set grounded=false and emit the safe fallback'); (2) POST to the configured route (native /v1/text/chatcompletion_v2?GroupId=... or OpenAI-compat /v1/chat/completions) with model/messages/temperature/max_completion_tokens; (3) check transport: raise MiniMaxTransportError on non-2xx or httpx error; on native route ALSO check base_resp.status_code != 0 -> raise MiniMaxApiError(status_code,status_msg); inspect output_sensitive/content_filter and downgrade to grounded=False fallback if the model refused; (4) parse choices[0].message.content \u2014 for compose, the content IS the line (strip, enforce max_words, derive dialog_act from a returned tag or a classifier); for interpret, parse the JSON object content, schema-validate with the DenialInterpretation parser, and on parse failure retry once with a 'return valid JSON only' nudge then fall back to ambiguous=True; (5) map usage -> TokenUsage and stamp adapter='minimax-real', model=resp.model. Resilience: bounded retries (2) with jittered backoff on 429/5xx/timeout via a small retry helper (idempotent because temperature is low and calls are stateless); per-call timeout from settings; all exceptions are typed (MiniMaxTransportError/MiniMaxApiError/MiniMaxParseError) so the Service layer can degrade to the sim adapter or an on-device line. The adapter assumes inbound text is ALREADY PHI-redacted (redaction happens upstream in the Service via the redaction port) and never logs message bodies \u2014 only ids, token counts, latency, finish_reason.",
+    "sim_adapter": "File: orchestrator/backstop/adapters/minimax_sim.py \u2014 class MiniMaxSimReasoningAdapter(ReasoningPort). A REAL local grounded-NLG + denial-classification engine, NOT an echo and NOT a network call. Same constructor-injected dependencies minus the http client: __init__(self, lexicon: DenialLexicon, nlg: GroundedNLG, clock: Clock). compose_line works as genuine slot-filling NLG: (1) rank req.evidence by score and lexical overlap with call_state.dialog_goal + last_payer_utterance using a real TF-IDF/cosine scorer (reuse the same TF-IDF utility the Moss sim uses, kept in a shared text util module \u2014 single responsibility, no duplication); (2) select the top-1/2 grounded snippets; if the best score is below a threshold, return grounded=False with a deterministic safe fallback line ('I want to make sure I cite the correct policy \u2014 can you give me the specific reason code on file?') so insufficient-evidence behavior matches the real adapter's contract; (3) choose a dialog_act by matching call_state against a rule table (e.g. denial mentions 'not medically necessary' + evidence contains an LCD/policy snippet -> 'cite_policy'; payer asks for a number -> 'request_reference_number'); (4) realize the line by filling a vetted, audit-safe template for that dialog_act with the claim facts + the cited snippet's key phrase, then enforce max_words. It composes from evidence + state \u2014 different inputs yield genuinely different, grounded lines. interpret_denial uses a real classifier: a curated CARC/RARC lexicon (data/carc_rarc.json: code -> {category, canonical_reason, default_route, rebuttal_template}) plus keyword/regex denial-reason matching over denial_text; it maps to category + codes, picks recommended_route from the lexicon (appeal/resubmit/peer_to_peer/request_records), grounds rebuttal_hook against the best-matching evidence snippet (or marks ambiguous=True when multiple categories tie or no code matches), and sets next_dialog_act consistently. Both methods emit the SAME dataclasses as the real adapter with adapter='minimax-sim', a synthetic-but-real TokenUsage (word counts), confidence from the actual match scores, and citations to real evidence ids. Because the sim is deterministic and offline it doubles as the test double for every Service-layer test and as the runtime fallback when MiniMax is down or PAVO declines the cloud tier.",
+    "wiring": "Layering Controller -> Service -> Port -> Adapter, wired by the composition root (orchestrator/backstop/composition.py / DI container). (1) Port lives at orchestrator/backstop/ports/reasoning_port.py (abstract ReasoningPort + the request/result dataclasses). (2) Both adapters are bound in the composition root: it reads settings, decides real vs sim from MINIMAX_MODE (real|sim) and/or PAVO's per-turn tier decision, constructs the shared httpx.AsyncClient + MiniMaxSettings for the real adapter and the DenialLexicon/GroundedNLG for the sim, and provides a ReasoningPort to the Service. (3) Invocation point in the pipeline: in call.py's per-turn PAVO loop (the PAVO step). Sequence per agent turn: PAVO router scores the turn -> if it routes to the cloud/hybrid (mid-tier reasoning) tier, the TurnService (a) calls Moss RetrievalPort to fetch evidence, (b) passes evidence+state through the TrueFoundry RedactionPort so only de-identified text leaves the boundary, (c) calls ReasoningPort.compose_line (or interpret_denial when the last payer utterance is an ambiguous denial reason) to get the grounded line + dialog_act + citations, (d) hands the line to the Qwen TTS port and LiveKit transport port for speech, while citations + dialog_act + token usage flow into the per-appeal evidence timeline and the TrueFoundry audit/cost ledger. If PAVO routes to ondevice_fast, or the real adapter raises/refuses, the Service uses the sim ReasoningPort as the degraded path \u2014 identical interface, so call.py is unchanged. The grounded line + citations later feed letter.py so the verbatim appeal letter is traceable to the same evidence the agent spoke. swarm.py runs many such TurnServices concurrently; concurrency is bounded by the AWS burst port (Semaphore in sim), and each MiniMax call is an awaited async REST call on the shared client, so the swarm is not serialized.",
+    "tests": [
+      {
+        "file": "tests/ports/test_reasoning_port_contract.py",
+        "type": "contract",
+        "description": "Port-level contract suite, parametrized over BOTH adapters (real adapter driven against a mocked httpx transport via httpx.MockTransport; sim adapter run for real). Asserts every adapter honors the ReasoningPort contract identically: compose_line returns a ComposeLineResult whose line is <= max_words; citations is a subset of the supplied evidence ids (NEVER cites an id that was not provided = no fabrication); grounded=False yields the deterministic safe fallback and empty/limited citations; dialog_act is in the allowed enum; interpret_denial returns category/codes/route in their allowed enums and citations subset evidence ids; adapter field is correct. Same test body, two fixtures \u2014 proves substitutability."
+      },
+      {
+        "file": "tests/adapters/test_minimax_real.py",
+        "type": "unit",
+        "description": "Real adapter against httpx.MockTransport (no network). Cases: (a) native happy path -> request goes to /v1/text/chatcompletion_v2 with ?GroupId=, Authorization: Bearer header set, model/temperature/max_completion_tokens from settings; response choices[0].message.content parsed into line; usage mapped to TokenUsage. (b) base_resp.status_code != 0 with HTTP 200 -> raises MiniMaxApiError (proves we don't trust HTTP status alone). (c) 429 then 200 -> retry succeeds; 3x 5xx -> MiniMaxTransportError after bounded retries. (d) output_sensitive/content_filter finish_reason -> downgrades to grounded=False fallback. (e) interpret_denial with malformed JSON content -> one retry nudge, then ambiguous=True fallback (MiniMaxParseError path). (f) OpenAI-compatible route flag -> hits /v1/chat/completions with no GroupId and no base_resp check. (g) asserts NO PHI is logged and message bodies are never emitted to the logger (capture logs)."
+      },
+      {
+        "file": "tests/adapters/test_minimax_sim.py",
+        "type": "unit",
+        "description": "Sim adapter as a REAL engine. Cases: (a) given two different evidence sets + call states, compose_line returns two DIFFERENT grounded lines that each cite the actually-best evidence id (proves it's NLG, not echo, and is grounded). (b) when all evidence scores below threshold -> grounded=False + exact safe fallback line. (c) dialog_act rule table: 'not medically necessary' + LCD snippet -> 'cite_policy'; payer asks for a number -> 'request_reference_number'. (d) interpret_denial: CARC 50 ('not deemed a medical necessity') text -> category='medical_necessity', recommended_route in {'appeal','peer_to_peer'}, rebuttal_hook grounded in evidence; CARC 16 ('missing/incomplete info') -> route='resubmit'. (e) ambiguous text with no code match / tie -> ambiguous=True. (f) determinism: identical input twice -> identical output (so it's a stable test double)."
+      },
+      {
+        "file": "tests/services/test_turn_service_reasoning.py",
+        "type": "unit",
+        "description": "Service/use-case wiring with the sim adapter injected as the ReasoningPort test double and fakes for Moss/Redaction/TTS ports. Asserts: (a) on a hybrid/cloud-tier turn the Service calls RedactionPort BEFORE ReasoningPort (no raw PHI string ever reaches the reasoning adapter \u2014 assert the adapter received only redacted tokens). (b) the composed line + citations are forwarded to the evidence timeline and to the TTS port. (c) when the (mocked real) ReasoningPort raises MiniMaxTransportError, the Service falls back to the sim ReasoningPort and the turn still completes (degraded path). (d) when PAVO routes ondevice_fast, ReasoningPort.compose_line is NOT called at all."
+      },
+      {
+        "file": "tests/adapters/test_minimax_health.py",
+        "type": "unit",
+        "description": "health(): real adapter returns ready=True/mode='real' on a mocked 200 ping and ready=False on transport error without throwing; sim adapter always ready=True/mode='sim'. Confirms the composition root can probe either binding uniformly for /health."
+      }
+    ]
+  },
+  {
+    "sponsor": "Qwen / DashScope (Alibaba Cloud Model Studio)",
+    "capability": "Brand-voice multilingual TTS. Synthesizes the agent's spoken appeals-coordinator line \u2014 the exact words MiniMax composed for a turn \u2014 into playable audio using ONE cloned/branded coordinator voice (Qwen3-TTS / CosyVoice). Multilingual (member may need ES/ZH); audio is the payload pushed over LiveKit transport to the (sandbox) IVR and is what the nurse hears on barge-in. Sim adapter must produce a VALID playable 16-bit PCM WAV with real samples (a synthesized formant/tone envelope of the right duration), never a 24-byte fake or an echo.",
+    "keys_needed": [
+      "QWEN_API_KEY (alias accepted)",
+      "DASHSCOPE_API_KEY (canonical DashScope key; either env var resolves to the same Bearer token)",
+      "QWEN_REGION (optional; 'intl' -> dashscope-intl.aliyuncs.com [Singapore], 'cn' -> dashscope.aliyuncs.com [Beijing]; default 'intl')",
+      "QWEN_TTS_MODEL (optional; default 'qwen3-tts-flash' for built-in voices, 'cosyvoice-v3.5-plus' when a cloned voice_id is configured)",
+      "QWEN_VOICE_ID (optional; the cloned coordinator voice_id from enrollment, e.g. 'cosyvoice-v3.5-plus-coordinator-xxxxxxxx'; falls back to built-in 'Cherry' if unset)",
+      "QWEN_MODE (real | sim; per-adapter mode flag, mirrors other integrations)"
+    ],
+    "real_api": {
+      "base_url": "https://dashscope-intl.aliyuncs.com (Singapore/intl) or https://dashscope.aliyuncs.com (Beijing/cn). Region-selected by QWEN_REGION.",
+      "auth_scheme": "HTTP Bearer token in the Authorization header: 'Authorization: Bearer ${DASHSCOPE_API_KEY}'. Content-Type: application/json. Optional 'X-DashScope-DataInspection: enable'. WebSocket uses the same Bearer header on the upgrade request. NOTE (PHI): DataInspection MUST be left DISABLED for PHI traffic, and text sent to Qwen MUST already be TrueFoundry-redacted upstream \u2014 see notes.",
+      "sdk_or_lib": "Official: 'dashscope' Python SDK (pip install dashscope; dashscope.audio.tts_v2.SpeechSynthesizer, and dashscope.audio.qwen_tts / MultiModalConversation). We deliberately DO NOT take the SDK as a hard dependency in the adapter \u2014 we call the REST/WS endpoints with httpx (async) + the stdlib 'wave' module so the adapter is thin, testable, and free of SDK global state. SDK is acceptable as an optional path but the spec targets raw HTTP/WS.",
+      "endpoints": [
+        {
+          "name": "Non-streaming synthesis (primary real path)",
+          "method": "POST",
+          "path": "/api/v1/services/aigc/multimodal-generation/generation",
+          "request": {
+            "model": "qwen3-tts-flash (built-in voice) | cosyvoice-v3.5-plus (cloned voice)",
+            "input": {
+              "text": "<already PHI-redacted spoken line>",
+              "voice": "Cherry | <cloned voice_id>",
+              "language_type": "English | Spanish | Chinese (optional; for multilingual)"
+            }
+          },
+          "response": {
+            "output": {
+              "audio": {
+                "url": "https://.../xxxx.wav  (download link, EXPIRES in 24h)",
+                "expires_at": "<epoch>"
+              }
+            },
+            "usage": {
+              "characters": "<n>"
+            },
+            "request_id": "<id>"
+          },
+          "audio_format": "PCM 24000 Hz, 16-bit, mono (wrapped as WAV at the returned URL). Adapter MUST GET the url and return the bytes; never hand a URL downstream (it expires and leaks an external fetch into the voice path)."
+        },
+        {
+          "name": "Voice enrollment / clone the coordinator voice (one-time provisioning, not per-turn)",
+          "method": "POST",
+          "path": "/api/v1/services/audio/tts/customization",
+          "request": {
+            "model": "voice-enrollment",
+            "input": {
+              "action": "create_voice",
+              "target_model": "cosyvoice-v3.5-plus",
+              "prefix": "coordinator",
+              "url": "<https url to the reference audio sample of the brand voice>",
+              "language_hints": [
+                "en"
+              ]
+            }
+          },
+          "response": {
+            "output": {
+              "voice_id": "cosyvoice-v3.5-plus-coordinator-xxxxxxxx"
+            },
+            "usage": {
+              "count": 1
+            },
+            "request_id": "<id>"
+          },
+          "notes": "Run once during setup; persist voice_id as QWEN_VOICE_ID. A voice is bound to its target_model and cannot be reused across models."
+        },
+        {
+          "name": "Voice management (list/query/delete)",
+          "method": "POST",
+          "path": "/api/v1/services/audio/tts/customization",
+          "request": {
+            "model": "voice-enrollment",
+            "input": {
+              "action": "list_voice | query_voice | delete_voice",
+              "voice_id": "<id> (for query/delete)",
+              "prefix": "coordinator (for list)",
+              "page_size": 10,
+              "page_index": 0
+            }
+          },
+          "response": {
+            "output": {
+              "voice_list": [
+                {
+                  "voice_id": "...",
+                  "status": "OK|DEPLOYING|UNDEPLOYED",
+                  "gmt_create": "...",
+                  "target_model": "..."
+                }
+              ]
+            }
+          },
+          "notes": "Used by an admin/health check to confirm the cloned voice status == OK before relying on it. Not on the per-turn hot path."
+        },
+        {
+          "name": "Real-time bidirectional streaming synthesis (low-latency path for live IVR turns)",
+          "method": "WSS",
+          "path": "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime (intl) | wss://dashscope.aliyuncs.com/api-ws/v1/realtime (cn)",
+          "request": {
+            "connect_headers": {
+              "Authorization": "Bearer ${DASHSCOPE_API_KEY}"
+            },
+            "session_update": {
+              "type": "session.update",
+              "session": {
+                "voice": "Cherry | <cloned voice_id>",
+                "response_format": "PCM_24000HZ_MONO_16BIT",
+                "mode": "server_commit"
+              }
+            },
+            "append_text": {
+              "type": "input_text_buffer.append",
+              "text": "<chunk>"
+            },
+            "commit": {
+              "type": "input_text_buffer.commit"
+            }
+          },
+          "response_events": [
+            {
+              "type": "session.created"
+            },
+            {
+              "type": "response.audio.delta",
+              "delta": "<base64 PCM_24000HZ_MONO_16BIT chunk>"
+            },
+            {
+              "type": "response.done"
+            },
+            {
+              "type": "session.finished"
+            }
+          ],
+          "audio_format": "Raw PCM 24000 Hz, 16-bit, mono in base64 'delta' fields. Adapter concatenates decoded deltas and (for the synth() return) wraps in a WAV header via stdlib wave; for streaming, yields raw PCM frames to LiveKit.",
+          "notes": "Optional second real adapter (QwenRealtimeTtsAdapter) for sub-second first-audio latency. The synth() (whole-line) path uses the non-streaming endpoint; the synth_stream() path uses this WS endpoint. Both satisfy the same port."
+        }
+      ],
+      "notes": "VERIFIED against Alibaba Cloud Model Studio docs (qwen-tts, qwen-tts-realtime, cosyvoice-clone-design-api), June 2026. High-confidence facts: base URLs (intl/cn), Bearer auth, non-streaming endpoint /api/v1/services/aigc/multimodal-generation/generation returning output.audio.url (24h expiry), 24000Hz/16-bit/mono default, enrollment endpoint /api/v1/services/audio/tts/customization with action/target_model/prefix/voice_id, WS realtime endpoint /api-ws/v1/realtime with PCM_24000HZ_MONO_16BIT deltas, built-in voices (Cherry, Ethan, Serena, Chelsie, Dylan, ...). LOWER-confidence / likely-contract: the exact WS event type strings for append/commit may differ slightly between the qwen-tts-realtime protocol and the OpenAI-realtime-compatible naming (docs show both append_text()/commit() SDK helpers and response.audio.delta events); the adapter must tolerate both 'input_text_buffer.append'/'append_text' message shapes \u2014 treat the WS message names as the most-likely contract and pin them behind the adapter so a one-line change fixes any drift. The non-streaming response returning a URL (not inline base64) is the documented behavior for qwen3-tts-flash; the enrollment voice-design path returns inline base64 (output.preview_audio.data) \u2014 handle both. Pricing: per-character; route cost through TrueFoundry cost meter. PHI WARNING: Qwen/DashScope is a third-party processor with no BAA \u2014 the text crossing this boundary MUST be the redacted spoken line only (no member IDs/names/claim numbers); redaction is enforced by the TrueFoundry port BEFORE the line reaches MiniMax/Qwen, and the synth input is asserted PHI-clean in a guard."
+    },
+    "port_name": "SpeechSynthesisPort (a.k.a. TtsPort) \u2014 the brand-voice TTS capability. One responsibility: text -> playable audio bytes in the coordinator voice. Lives at orchestrator/backstop/ports/speech_synthesis_port.py.",
+    "port_methods": [
+      {
+        "signature": "async def synth(self, req: SynthRequest) -> SynthResult",
+        "purpose": "Whole-line synthesis. Takes a SynthRequest(text: str, voice_id: Optional[str]=None, language: Language=Language.EN, sample_rate: int=24000) and returns SynthResult(audio: bytes  # complete WAV container, real PCM samples, sample_rate: int, channels: int, sample_width_bytes: int, duration_ms: int, voice_id: str, mode: Literal['real','sim'], cost_chars: int). The returned bytes MUST be a valid, playable WAV (RIFF/WAVE header + PCM data) for BOTH adapters. Used to render a full composed spoken line for one turn."
+      },
+      {
+        "signature": "async def synth_stream(self, req: SynthRequest) -> AsyncIterator[AudioFrame]",
+        "purpose": "Low-latency streaming synthesis. Yields AudioFrame(pcm: bytes, sample_rate: int, channels: int, seq: int) raw-PCM frames as they are produced, for piping into LiveKit with minimal first-audio latency and to support nurse barge-in (cancellation mid-stream). Real adapter uses the WS realtime endpoint; sim adapter chunks its locally-generated PCM into frames. Default port impl MAY derive synth_stream by chunking synth()'s output so simple adapters only implement synth()."
+      },
+      {
+        "signature": "async def health(self) -> PortHealth",
+        "purpose": "Liveness/readiness. Real adapter: confirms the configured cloned voice_id status == 'OK' via list_voice/query_voice (cheap, cached) and reports mode='real'. Sim adapter: returns ok=True, mode='sim'. Drives the dashboard's per-integration real/sim badge and the composition-root fallback decision."
+      },
+      {
+        "signature": "# Value objects (models.py / ports module, dataclasses, no logic): SynthRequest, SynthResult, AudioFrame, enum Language(EN, ES, ZH), PortHealth(ok: bool, mode: str, detail: str)",
+        "purpose": "Typed boundary objects so Controller/Service never see vendor JSON. SynthRequest.text is asserted PHI-redacted by the Service before it reaches the port (the port contract documents this precondition)."
+      }
+    ],
+    "real_adapter": "orchestrator/backstop/integrations/qwen.py :: QwenTtsAdapter(SpeechSynthesisPort). One responsibility: translate SynthRequest <-> DashScope HTTP/WS and return WAV bytes. Construction (DI): QwenTtsAdapter(http: httpx.AsyncClient, api_key: str, region: str='intl', model: str='qwen3-tts-flash', default_voice_id: str='Cherry', clock=time.monotonic) \u2014 all collaborators injected; no module-level globals, no SDK singleton. synth(): POST {model, input:{text, voice: req.voice_id or default_voice_id, language_type: map(req.language)}} to /api/v1/services/aigc/multimodal-generation/generation with Bearer header; parse output.audio.url; GET the url bytes (same injected client, bounded timeout); validate the bytes parse as a RIFF/WAVE PCM stream via stdlib wave (reject empty/HTML/expired-URL bodies); normalize to req.sample_rate if needed; return SynthResult(audio=wav_bytes, mode='real', cost_chars=len(text), duration_ms=computed_from_frames, voice_id=resolved). If the response carries inline base64 (voice-design/preview path), base64-decode and wrap with wave instead of fetching a URL. synth_stream(): open WSS to /api-ws/v1/realtime, send session.update {voice, response_format:'PCM_24000HZ_MONO_16BIT', mode:'server_commit'}, append text + commit, base64-decode each response.audio.delta into AudioFrame(seq++) until response.done; on cancellation (nurse barge-in) close the socket promptly. health(): query_voice for the configured cloned voice_id (skip if a built-in voice), cache result for N seconds. Errors map to typed SynthError (auth, rate-limit/429 with Retry-After, expired-url, malformed-audio, timeout) \u2014 never leak raw httpx/vendor exceptions across the port. Cost (cost_chars) is reported to the TrueFoundry cost meter by the Service, not by this adapter (single responsibility). No ret/PHI logging: text is never logged.",
+    "sim_adapter": "orchestrator/backstop/integrations/qwen_sim.py :: SimTtsAdapter(SpeechSynthesisPort). REAL local DSP \u2014 NOT an echo, NOT a 24-byte stub. Produces a genuine, playable mono 16-bit PCM WAV whose DURATION is derived from the input text and whose WAVEFORM is a deterministic synthesized speech-like envelope, so downstream code (WAV decode, LiveKit framing, duration math, nurse playback, tests) all behave exactly as with the real adapter. Algorithm (pure stdlib: math, struct, wave, io, hashlib, base64): (1) Estimate duration = max(MIN_MS, words * MS_PER_WORD) using a configurable speaking rate (~165 wpm default) plus per-sentence pauses, so a longer appeal line yields a longer WAV \u2014 this is the genuine 'work'. (2) Build a per-character pseudo-formant generator: hash(voice_id + text) seeds a deterministic RNG so the SAME request always yields byte-identical audio (testability); for each phoneme-slot derive a fundamental f0 (voice_id sets the base pitch band so different voices sound different) plus 2-3 formant partials, apply a short ADSR amplitude envelope per syllable and inter-word silences, summing sine partials sample-by-sample at the requested sample_rate (default 24000). (3) Clamp to int16, write a proper RIFF/WAVE header via the wave module (nchannels=1, sampwidth=2, framerate=sample_rate), return SynthResult(audio=wav_bytes, mode='sim', cost_chars=len(text), duration_ms=actual, voice_id=req.voice_id or 'sim-coordinator'). synth_stream() slices that PCM into fixed-size AudioFrames (e.g. 20ms) and yields them with a tiny await sleep to emulate streaming/barge-in. health() -> PortHealth(ok=True, mode='sim'). The output is intentionally intelligible-shaped (varying pitch/amplitude that tracks the text) rather than flat noise, so a human listening to the dashboard hears a plausible voice-like tone of the correct length \u2014 demonstrating the pipeline end-to-end with zero external calls and zero PHI egress. Deterministic => unit-testable byte-for-byte.",
+    "wiring": "Layering: Controller -> Service -> SpeechSynthesisPort -> {QwenTtsAdapter | SimTtsAdapter}, wired in the composition root. (1) COMPOSITION ROOT (orchestrator/backstop/composition.py / DI container): reads QWEN_MODE (or auto: real if DASHSCOPE_API_KEY/QWEN_API_KEY present AND health() ok, else sim) and binds SpeechSynthesisPort to QwenTtsAdapter(real) or SimTtsAdapter. The chosen adapter is injected into the VoiceTurnService \u2014 neither the Service nor call.py imports qwen.py directly. (2) HOT PATH (per-turn PAVO loop, call.py): the turn pipeline is PAVO-router decides action -> Moss retrieves rebuttal -> MiniMax composes the spoken line (mid-tier reasoning) -> TrueFoundry redaction port asserts/strips PHI from that line -> SpeechSynthesisPort.synth()/synth_stream() renders coordinator-voice audio -> LiveKit transport adapter pushes the audio frames onto the call (sandbox IVR) and to the nurse monitor channel. Qwen sits squarely between 'compose line' and 'play line', invoked once per agent utterance. PHI PRECONDITION: the Service guarantees req.text passed to synth() has already gone through the TrueFoundry redact port \u2014 a guard in VoiceTurnService raises if an un-redacted marker is detected, so PHI never reaches Qwen (third-party, no BAA). (3) BARGE-IN: synth_stream() supports cancellation so a nurse barge-in over LiveKit stops synthesis immediately. (4) COST/AUDIT: VoiceTurnService reports SynthResult.cost_chars + voice_id + mode to the TrueFoundry cost/audit ports (keeps qwen.py single-responsibility). (5) FEATURE SUBSTRATE: the same port renders the read-aloud of the final appeal letter summary in the nurse review queue, and multilingual member-facing lines \u2014 both call SpeechSynthesisPort, swappable real/sim.",
+    "tests": [
+      {
+        "name": "test_port_contract__both_adapters_return_valid_playable_wav",
+        "kind": "contract (parametrized over [SimTtsAdapter, QwenTtsAdapter-with-mocked-httpx])",
+        "asserts": "For a fixed SynthRequest, synth() returns SynthResult whose .audio parses with wave.open() as RIFF/WAVE: nchannels==1, sampwidth==2, framerate==req.sample_rate, getnframes()>0, and len(frames)>1KB (NOT a 24-byte fake). duration_ms matches frames/framerate within tolerance. This is THE anti-echo / anti-stub gate and runs identically against both adapters via the shared port.",
+        "double": "Sim is the test double for the real adapter; real adapter's httpx client mocked to return a canned WAV-URL + WAV bytes."
+      },
+      {
+        "name": "test_sim__duration_scales_with_text_length",
+        "kind": "unit (sim)",
+        "asserts": "synth('three words here').duration_ms < synth(<60-word paragraph>).duration_ms, and a longer line yields strictly more PCM frames \u2014 proves the sim does real length-dependent work, not a constant blob."
+      },
+      {
+        "name": "test_sim__deterministic_bytes",
+        "kind": "unit (sim)",
+        "asserts": "Two synth() calls with the same (text, voice_id, sample_rate) return byte-identical .audio; different voice_id => different audio (different pitch band). Locks determinism for reproducible tests/demos."
+      },
+      {
+        "name": "test_sim__audio_is_not_silence_and_not_white_noise",
+        "kind": "unit (sim)",
+        "asserts": "Decoded int16 samples have non-trivial RMS energy (> floor) AND amplitude/pitch varies across the clip (windowed RMS variance > 0) \u2014 i.e. it's a voice-like envelope tracking the text, not flat silence and not constant noise."
+      },
+      {
+        "name": "test_real__synth_posts_correct_dashscope_payload",
+        "kind": "unit (real, mocked httpx)",
+        "asserts": "synth() issues POST to /api/v1/services/aigc/multimodal-generation/generation with Authorization: Bearer <key>, body input.text == request text, input.voice == resolved voice_id, correct language_type mapping; then GETs output.audio.url and returns those bytes wrapped/validated as WAV with mode=='real'. Region switch (intl/cn) selects correct base URL."
+      },
+      {
+        "name": "test_real__inline_base64_branch",
+        "kind": "unit (real, mocked httpx)",
+        "asserts": "When the mocked response carries output.preview_audio.data (base64) instead of an audio.url, the adapter base64-decodes and returns valid WAV (covers the voice-design/preview contract variant)."
+      },
+      {
+        "name": "test_real__expired_or_html_url_body_raises_typed_error",
+        "kind": "unit (real, mocked httpx)",
+        "asserts": "If the audio URL fetch returns non-WAV bytes (HTML/empty/expired), adapter raises SynthError(kind='malformed_audio' or 'expired_url') \u2014 never returns a corrupt blob downstream, never leaks raw httpx exception."
+      },
+      {
+        "name": "test_real__429_maps_to_rate_limit_error_with_retry_after",
+        "kind": "unit (real, mocked httpx)",
+        "asserts": "HTTP 429 -> SynthError(kind='rate_limit', retry_after=<parsed Retry-After>); 401 -> SynthError(kind='auth'). Confirms vendor errors are normalized at the port boundary."
+      },
+      {
+        "name": "test_stream__frames_reassemble_to_synth_output",
+        "kind": "unit (both)",
+        "asserts": "Concatenated AudioFrame.pcm from synth_stream() equals the PCM payload of synth()'s WAV (sim: exact; real: mocked WS deltas reassemble to the canned PCM). seq numbers are contiguous from 0."
+      },
+      {
+        "name": "test_stream__cancellation_stops_within_one_frame (barge-in)",
+        "kind": "unit (both)",
+        "asserts": "Cancelling the synth_stream() async iterator (nurse barge-in) stops yielding promptly and, for the real adapter, closes the WS \u2014 verifies barge-in support."
+      },
+      {
+        "name": "test_phi_precondition_guard",
+        "kind": "unit (service-level, sim port injected)",
+        "asserts": "VoiceTurnService raises/refuses if text handed to synth() contains an un-redacted PHI marker (e.g. a member-id pattern), proving Qwen never receives raw PHI. Confirms the TrueFoundry-redact-before-Qwen ordering at the wiring boundary."
+      },
+      {
+        "name": "test_composition_root__mode_selection_and_fallback",
+        "kind": "unit (DI)",
+        "asserts": "QWEN_MODE=sim binds SimTtsAdapter; QWEN_MODE=real with key binds QwenTtsAdapter; auto-mode with missing key OR failing health() falls back to Sim and the dashboard badge reflects mode. No real network in any unit test (httpx/WS mocked); the suite is green before proceeding to the next pipeline step (test-gated/TDD)."
+      }
+    ]
+  },
+  {
+    "sponsor": "LiveKit",
+    "capability": "Real-time voice transport for the agent swarm: each concurrent payer call runs over a LiveKit room, and a human appeals nurse can be bridged into any live call (barge-in / takeover) by minting a short-lived, scoped access token. The port mints signed access tokens (room-scoped JWT grants), manages room lifecycle (create/delete/list), enumerates live participants, and forcibly removes a participant. PAVO-driven audio frames and the nurse's barge-in audio flow over the same room transport.",
+    "keys_needed": [
+      "LIVEKIT_URL",
+      "LIVEKIT_API_KEY",
+      "LIVEKIT_API_SECRET"
+    ],
+    "real_api": {
+      "base_url": "Two surfaces. (1) Token minting is OFFLINE/local crypto \u2014 no network call: an HS256 JWT is signed with LIVEKIT_API_SECRET. (2) Server RoomService is HTTP via Twirp at the LIVEKIT_URL host. LIVEKIT_URL is typically a wss:// signaling URL (e.g. wss://backstop-xyz.livekit.cloud); the RoomService HTTP base is the same host over https (https://backstop-xyz.livekit.cloud). Twirp endpoints live under POST /twirp/livekit.RoomService/<MethodName>.",
+      "auth_scheme": "Bearer JWT (HS256). The JWT is signed with LIVEKIT_API_SECRET; claim iss = LIVEKIT_API_KEY, sub = participant identity, exp/nbf set TTL (SDK DEFAULT_TTL = 6h), and a custom 'video' grant claim object scopes permissions. Participant-join tokens carry video.roomJoin=true + video.room=<roomName> (+ canPublish/canSubscribe/canPublishData). RoomService management calls require a token whose grants include roomCreate (CreateRoom/DeleteRoom), roomList (ListRooms), or roomAdmin (ListParticipants/RemoveParticipant). The token goes in HTTP header 'Authorization: Bearer <jwt>'.",
+      "endpoints": [
+        {
+          "name": "Mint access token (local, no HTTP)",
+          "sdk": "api.AccessToken(api_key, api_secret).with_identity(identity).with_name(name).with_grants(api.VideoGrants(room_join=True, room=room_name, can_publish=True, can_subscribe=True, can_publish_data=True, hidden=False)).with_ttl(timedelta(...)).to_jwt()",
+          "produces": "a compact HS256 JWT string. Claims: {iss: API_KEY, sub: identity, nbf, exp, video: {room, roomJoin, canPublish, canSubscribe, canPublishData, hidden, roomAdmin?, roomCreate?}}",
+          "notes": "Pure crypto via PyJWT under the hood: jwt.encode(claims, api_secret, algorithm='HS256'). Verified with api.TokenVerifier(api_key, api_secret).verify(token)."
+        },
+        {
+          "name": "CreateRoom",
+          "method": "POST",
+          "path": "/twirp/livekit.RoomService/CreateRoom",
+          "sdk": "await lkapi.room.create_room(api.CreateRoomRequest(name=..., empty_timeout=..., max_participants=..., metadata=...))",
+          "request": {
+            "name": "string (required)",
+            "empty_timeout": "uint32 secs (auto-close when empty)",
+            "departure_timeout": "uint32 secs",
+            "max_participants": "uint32",
+            "metadata": "string (JSON-encoded appeal context, no PHI)"
+          },
+          "response": "Room {sid, name, empty_timeout, max_participants, creation_time, metadata, num_participants, active_recording}"
+        },
+        {
+          "name": "DeleteRoom",
+          "method": "POST",
+          "path": "/twirp/livekit.RoomService/DeleteRoom",
+          "sdk": "await lkapi.room.delete_room(api.DeleteRoomRequest(room=room_name))",
+          "request": {
+            "room": "string"
+          },
+          "response": "DeleteRoomResponse (empty)"
+        },
+        {
+          "name": "ListRooms",
+          "method": "POST",
+          "path": "/twirp/livekit.RoomService/ListRooms",
+          "sdk": "await lkapi.room.list_rooms(api.ListRoomsRequest(names=[...]))",
+          "request": {
+            "names": "optional list<string> filter"
+          },
+          "response": "ListRoomsResponse {rooms: list<Room>}"
+        },
+        {
+          "name": "ListParticipants",
+          "method": "POST",
+          "path": "/twirp/livekit.RoomService/ListParticipants",
+          "sdk": "await lkapi.room.list_participants(api.ListParticipantsRequest(room=room_name))",
+          "request": {
+            "room": "string"
+          },
+          "response": "ListParticipantsResponse {participants: list<ParticipantInfo{sid, identity, name, state, tracks, metadata, joined_at, is_publisher}>}"
+        },
+        {
+          "name": "RemoveParticipant",
+          "method": "POST",
+          "path": "/twirp/livekit.RoomService/RemoveParticipant",
+          "sdk": "await lkapi.room.remove_participant(api.RemoveParticipantRequest(room=room_name, identity=identity))",
+          "request": {
+            "room": "string",
+            "identity": "string"
+          },
+          "response": "RemoveParticipantResponse (empty)"
+        }
+      ],
+      "sdk_or_lib": "livekit-api (pip install livekit-api) \u2014 provides livekit.api.AccessToken, VideoGrants, TokenVerifier, LiveKitAPI, RoomServiceClient, and the *Request dataclasses. Async client uses aiohttp; remember await lkapi.aclose(). Token signing uses PyJWT (HS256). Optional: livekit (livekit-rtc) for an in-process audio participant, only needed if we publish/subscribe real audio frames; not required for token+room lifecycle.",
+      "notes": "CONFIRMED from LiveKit source (livekit-api access_token.py): DEFAULT_TTL = timedelta(hours=6); to_jwt() does jwt.encode(claims, api_secret, algorithm='HS256'); AccessToken reads LIVEKIT_API_KEY/LIVEKIT_API_SECRET from env when args omitted; VideoGrants snake_case fields include room_create, room_list, room_record, room_admin, room_join, room, can_publish, can_subscribe, can_publish_data, hidden, recorder. RoomService is Twirp (POST + protobuf/JSON) under /twirp/livekit.RoomService/. UNCERTAIN: LIVEKIT_URL scheme handling \u2014 LiveKit Cloud gives a wss:// URL; LiveKitAPI accepts the https/wss host and normalizes internally, but for self-host confirm the http(s) RoomService port (default 7880). For Backstop we keep TTL short (e.g. 15 min for call tokens, 5 min for nurse barge-in tokens) rather than the 6h default, to bound PHI/transport exposure."
+    },
+    "port_name": "VoiceTransportPort",
+    "port_methods": [
+      {
+        "name": "open_channel",
+        "signature": "async def open_channel(self, call_id: str, *, max_participants: int = 4, ttl: timedelta = timedelta(minutes=15), metadata: str | None = None) -> Channel",
+        "purpose": "Provision a transport channel (LiveKit room) for one payer call and return a Channel handle {channel_id, room_name, agent_token, expires_at}. Idempotent on call_id (room name = f'appeal-{call_id}'). The returned agent_token is a join-scoped JWT for the swarm's voice agent (canPublish/canSubscribe/canPublishData, NOT admin)."
+      },
+      {
+        "name": "mint_join_token",
+        "signature": "def mint_join_token(self, *, channel_id: str, identity: str, display_name: str, can_publish: bool = True, can_subscribe: bool = True, ttl: timedelta = timedelta(minutes=15), admin: bool = False) -> JoinToken",
+        "purpose": "Mint a signed, room-scoped access token (JoinToken{token, identity, room, expires_at}) for a specific participant. Pure-crypto, no I/O. Used for the voice agent and (with a fresh short TTL) for the nurse bridging in."
+      },
+      {
+        "name": "bridge_nurse",
+        "signature": "async def bridge_nurse(self, *, channel_id: str, nurse_id: str, can_publish: bool = True, ttl: timedelta = timedelta(minutes=5)) -> JoinToken",
+        "purpose": "Barge-in: produce a short-lived nurse JoinToken scoped to the live call's channel so the human can listen/talk on the existing call. Validates the channel is live first (raises ChannelNotFound otherwise). This is the load-bearing 'hand a human into the call' capability."
+      },
+      {
+        "name": "list_participants",
+        "signature": "async def list_participants(self, channel_id: str) -> list[Participant]",
+        "purpose": "Enumerate who is currently on the call (agent, nurse, simulated payer rep) as Participant{identity, name, is_publisher, joined_at}. Powers the per-appeal evidence timeline / live call roster in the dashboard."
+      },
+      {
+        "name": "remove_participant",
+        "signature": "async def remove_participant(self, *, channel_id: str, identity: str) -> None",
+        "purpose": "Forcibly eject a participant (e.g. kill a runaway agent, or end the nurse's session). Maps to RemoveParticipant; admin-scoped."
+      },
+      {
+        "name": "close_channel",
+        "signature": "async def close_channel(self, channel_id: str) -> None",
+        "purpose": "Tear down the channel when the call ends/aborts (maps to DeleteRoom). Critical for cleanup \u2014 fixes the 'fire-and-forget / never cleaned' class of resource leaks for transport."
+      },
+      {
+        "name": "verify_token",
+        "signature": "def verify_token(self, token: str) -> Claims",
+        "purpose": "Decode + signature-verify a token, returning Claims{identity, room, grants, expires_at}. Used by the WS/HTTP edge to authorize an incoming participant or nurse-bridge request without trusting client-supplied identity. Sim and real must agree on the claim shape (contract-tested)."
+      }
+    ],
+    "real_adapter": "LiveKitVoiceTransportAdapter implements VoiceTransportPort using the livekit-api SDK. Construction takes (url, api_key, api_secret) injected from config (no env reads inside the adapter \u2014 composition root resolves them). One file, one responsibility: translate VoiceTransportPort calls into LiveKit primitives. open_channel(): builds room_name = f'appeal-{call_id}', calls await lkapi.room.create_room(api.CreateRoomRequest(name=room_name, empty_timeout=300, max_participants=max_participants, metadata=metadata)), then mints an agent join token and returns Channel. mint_join_token()/bridge_nurse(): build api.AccessToken(api_key, api_secret).with_identity(identity).with_name(display_name).with_ttl(ttl).with_grants(api.VideoGrants(room_join=True, room=room_name, can_publish=can_publish, can_subscribe=can_subscribe, can_publish_data=True, room_admin=admin)).to_jwt(); bridge_nurse first calls list_participants to assert the room is live. list_participants(): await lkapi.room.list_participants(api.ListParticipantsRequest(room=room_name)) mapped to Participant DTOs. remove_participant(): await lkapi.room.remove_participant(api.RemoveParticipantRequest(room=room_name, identity=identity)). close_channel(): await lkapi.room.delete_room(api.DeleteRoomRequest(room=room_name)) (swallow not-found as idempotent). verify_token(): api.TokenVerifier(api_key, api_secret).verify(token) \u2192 Claims. Holds a single LiveKitAPI(url, api_key, api_secret) instance; exposes async aclose() that calls lkapi.aclose() for graceful shutdown. Maps LiveKit/Twirp errors to domain errors (ChannelNotFound, TransportError) so the Service layer never sees vendor types. TTLs deliberately short (15 min agent / 5 min nurse) to bound PHI exposure on the wire.",
+    "sim_adapter": "InProcessVoiceTransportAdapter implements VoiceTransportPort as a REAL local transport \u2014 not an echo. It maintains an in-memory registry of channels {channel_id -> _SimRoom{room_name, participants: dict[identity -> Participant], created_at, max_participants}} guarded by an asyncio.Lock, plus an in-process asyncio pub/sub fabric so audio/data frames published by one participant are actually delivered to the others (each participant gets an asyncio.Queue; publish fans out to all other subscribers' queues \u2014 genuine concurrent transport that the call.py PAVO loop and a barge-in nurse can both attach to). Crucially, its tokens are REAL HS256 JWTs: it signs with a configured dev secret using PyJWT (jwt.encode(claims, secret, algorithm='HS256')) and verify_token() does jwt.decode(...) \u2014 so claim shape, signature, exp/nbf, and the 'video' grant block are byte-compatible with the real adapter and pass the same contract tests. open_channel creates a _SimRoom and enforces max_participants; bridge_nurse mints a short-TTL nurse token and registers a nurse participant on the live room (raises ChannelNotFound if the room was never opened or was closed) and wires its queue into the fabric so the nurse hears the live call; list_participants returns the live roster; remove_participant drops the participant and closes its queue (delivering a 'left' event); close_channel deletes the room and drains all queues. This lets the entire swarm run end-to-end with zero network and zero LiveKit account, while exercising real concurrency, real token crypto, real join/barge-in/eject semantics, and real frame delivery.",
+    "wiring": "Layering: Controller -> Service -> VoiceTransportPort -> {LiveKit|InProcess} Adapter, wired by the composition root / DI container. (1) Composition root (e.g. orchestrator/backstop/composition.py) reads LIVEKIT_URL/API_KEY/API_SECRET via the config object and binds VoiceTransportPort to LiveKitVoiceTransportAdapter when livekit.mode == 'real', else InProcessVoiceTransportAdapter; the chosen mode is surfaced in the integrations status panel. (2) SwarmService (swarm.py use-case) \u2014 when a denial detonates and the orchestrator spawns N concurrent calls, it calls await transport.open_channel(call_id, ...) per call to provision the room and obtain the agent join token; the AWS burst-concurrency port/semaphore caps how many channels are opened at once. (3) CallService (call.py per-turn PAVO loop) \u2014 the agent participant joins the channel with its token; each turn, PAVO-routed audio (composed by MiniMax, voiced by Qwen TTS) is published over the channel, and inbound IVR/payer audio is subscribed from it; channel_id is recorded on the appeal's evidence timeline. (4) Nurse barge-in path: the nurse review-queue Controller (server.py route, AUTHENTICATED \u2014 fixes the no-auth vuln) calls NurseBridgeService.bridge_into(call_id, nurse_id) -> await transport.bridge_nurse(channel_id, nurse_id, ttl=5min); the returned short-lived JoinToken is handed to the dashboard for the nurse client to connect \u2014 supporting the live takeover before the cryptographic sign-off gate. (5) WS/HTTP edge calls transport.verify_token(...) to authorize incoming participants instead of trusting client identity (closes the unauthenticated-WS / no-origin-check gaps for the voice surface). (6) Lifecycle: on call completion/abort and on graceful shutdown, the Service calls await transport.close_channel(channel_id) and the adapter's aclose() \u2014 fixing fire-and-forget tasks / no-graceful-shutdown / never-cleaned-resources for transport. Tokens are never logged; only claim metadata (identity, room, exp) goes to the TrueFoundry audit port.",
+    "tests": [
+      {
+        "name": "test_port_contract_run_against_both_adapters",
+        "type": "contract",
+        "parametrized_over": [
+          "InProcessVoiceTransportAdapter",
+          "LiveKitVoiceTransportAdapter(mock_transport)"
+        ],
+        "asserts": "Both adapters satisfy the VoiceTransportPort contract identically. Single parametrized suite (pytest fixture yields each adapter): open_channel returns a Channel with non-empty room_name + agent_token + future expires_at; mint_join_token returns a non-empty token; list_participants on a fresh channel is empty; bridge_nurse on an unknown channel raises ChannelNotFound; close_channel is idempotent. The LiveKit instance uses a mocked LiveKitAPI/room client (no network) so the contract \u2014 not the wire \u2014 is under test."
+      },
+      {
+        "name": "test_minted_token_is_valid_hs256_with_video_grant",
+        "type": "unit",
+        "target": "both adapters",
+        "asserts": "Token minted by mint_join_token(channel_id, identity='agent-7', room scoped) decodes under jwt.decode(token, secret, algorithms=['HS256']) and contains iss=api_key, sub='agent-7', exp>nbf, and claims['video'] with room==room_name, roomJoin==True, canPublish/canSubscribe/canPublishData set. verify_token(token) returns Claims with matching identity+room. A tampered token (flip one char of signature) makes verify_token raise. Proves sim does REAL crypto, not an echo, and is byte-compatible with real."
+      },
+      {
+        "name": "test_ttl_is_respected_and_short_for_nurse",
+        "type": "unit",
+        "target": "both adapters",
+        "asserts": "mint_join_token(ttl=15min) yields exp \u2248 now+15min (\u00b12s); bridge_nurse default token exp \u2248 now+5min. An expired token (ttl negative / frozen clock advanced past exp) makes verify_token raise an expiry error. Guards the PHI-exposure-bounding requirement."
+      },
+      {
+        "name": "test_grant_scoping_admin_vs_join",
+        "type": "unit",
+        "target": "both adapters",
+        "asserts": "mint_join_token(admin=False) produces a grant WITHOUT roomAdmin/roomCreate; admin=True (management token) includes roomAdmin. Verifies the least-privilege scoping that lets the WS edge reject participant tokens attempting admin actions."
+      },
+      {
+        "name": "test_inprocess_real_frame_delivery_between_participants",
+        "type": "unit",
+        "target": "InProcessVoiceTransportAdapter",
+        "asserts": "Open a channel, register agent + nurse, agent publishes a data/audio frame; nurse's subscription queue actually receives that exact frame and agent does not receive its own. Proves the sim is a genuine in-process transport (fan-out pub/sub), not a string echo \u2014 the core mandate."
+      },
+      {
+        "name": "test_bridge_nurse_into_live_call",
+        "type": "unit",
+        "target": "InProcessVoiceTransportAdapter",
+        "asserts": "After open_channel + agent join, bridge_nurse adds the nurse to the SAME room: list_participants now includes both identities; nurse token is room-scoped to that room; nurse can publish and the agent receives it (barge-in works). bridge_nurse on a closed channel raises ChannelNotFound."
+      },
+      {
+        "name": "test_max_participants_enforced",
+        "type": "unit",
+        "target": "InProcessVoiceTransportAdapter",
+        "asserts": "open_channel(max_participants=2); adding a 3rd participant raises ChannelFull. Mirrors LiveKit room max_participants so the sim has real backpressure semantics."
+      },
+      {
+        "name": "test_remove_and_close_cleanup",
+        "type": "unit",
+        "target": "both adapters",
+        "asserts": "remove_participant drops the identity from list_participants and closes its queue (sim); close_channel removes the channel so subsequent list_participants/bridge_nurse raise ChannelNotFound; close_channel twice does not raise (idempotent). Validates the leak-fix lifecycle."
+      },
+      {
+        "name": "test_real_adapter_calls_correct_sdk_with_expected_payloads",
+        "type": "unit",
+        "target": "LiveKitVoiceTransportAdapter",
+        "asserts": "With LiveKitAPI/room mocked: open_channel calls room.create_room with CreateRoomRequest(name='appeal-<id>', max_participants, metadata); close_channel calls room.delete_room(DeleteRoomRequest(room='appeal-<id>')); list_participants calls room.list_participants(ListParticipantsRequest(room=...)) and maps ParticipantInfo->Participant; remove_participant calls room.remove_participant(...). Confirms the Twirp method/argument contract without a live server."
+      },
+      {
+        "name": "test_real_adapter_maps_vendor_errors_to_domain_errors",
+        "type": "unit",
+        "target": "LiveKitVoiceTransportAdapter",
+        "asserts": "When the mocked room client raises a Twirp not-found on delete/list, the adapter raises domain ChannelNotFound (not the vendor exception); generic failures map to TransportError. Keeps vendor types out of the Service layer (hexagonal boundary)."
+      },
+      {
+        "name": "test_swarm_service_provisions_and_tears_down_channel",
+        "type": "integration (sim adapter as test double)",
+        "target": "SwarmService + CallService wired to InProcessVoiceTransportAdapter",
+        "asserts": "Detonating a denial opens one channel per spawned call (bounded by the concurrency-cap port), the call publishes/subscribes turns over it, and on completion/abort close_channel is invoked exactly once per channel (assert via spy). Proves the wiring + lifecycle end-to-end with zero network."
+      },
+      {
+        "name": "test_aclose_graceful_shutdown",
+        "type": "unit",
+        "target": "LiveKitVoiceTransportAdapter",
+        "asserts": "adapter.aclose() awaits lkapi.aclose() exactly once; safe to call when no channels open. Backs the graceful-shutdown vuln fix."
+      }
+    ]
+  },
+  {
+    "sponsor": "AWS",
+    "capability": "Elastic burst compute that gates swarm concurrency. The swarm fans out N parallel voice-agent appeals against payer lines; AWS provides an admission-control \"slot\" before each appeal-worker starts so the system can scale to hundreds of concurrent workers under load and idle to zero between batches. The port hides whether a slot is backed by a real AWS Fargate task in a managed pool (real adapter) or by an in-process asyncio.Semaphore (sim adapter). It is pure backpressure/capacity management \u2014 it does NOT touch PHI, payer data, or call content; it only meters concurrency.",
+    "keys_needed": [
+      "AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY",
+      "AWS_REGION (e.g. us-east-1)",
+      "AWS_SESSION_TOKEN (optional, for STS/assumed-role creds)",
+      "BACKSTOP_ECS_CLUSTER (cluster name/ARN hosting the worker pool)",
+      "BACKSTOP_ECS_TASK_DEFINITION (family:revision of the appeal-worker task def)",
+      "BACKSTOP_ECS_SUBNETS (comma-separated awsvpc subnet ids)",
+      "BACKSTOP_ECS_SECURITY_GROUPS (comma-separated sg ids)",
+      "BACKSTOP_ECS_CONTAINER_NAME (container name inside the task def, for overrides)",
+      "BACKSTOP_MAX_CONCURRENCY (hard ceiling on simultaneous slots; default 200)",
+      "BACKSTOP_ECS_ASSIGN_PUBLIC_IP (ENABLED|DISABLED; default DISABLED for private subnets+NAT)",
+      "BACKSTOP_ECS_CAPACITY_PROVIDER (FARGATE|FARGATE_SPOT; default FARGATE for steady, FARGATE_SPOT for cheap burst)"
+    ],
+    "real_api": {
+      "base_url": "https://ecs.<AWS_REGION>.amazonaws.com (AWS ECS regional endpoint; accessed via boto3/aioboto3, not raw HTTP). The sister Service Quotas endpoint https://servicequotas.<AWS_REGION>.amazonaws.com is used read-only to discover the account's Fargate vCPU ceiling.",
+      "auth_scheme": "AWS SigV4 request signing using AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (+ optional AWS_SESSION_TOKEN for assumed roles). boto3/botocore performs the signing automatically from the standard credential chain (env vars > shared config > instance/role). IAM principal must be granted ecs:RunTask, ecs:StopTask, ecs:DescribeTasks, ecs:ListTasks on the cluster + task definition, plus iam:PassRole for the task's executionRoleArn/taskRoleArn, and (read-only) servicequotas:GetServiceQuota.",
+      "endpoints": [
+        {
+          "op": "ecs.run_task",
+          "purpose": "Launch a Fargate task = acquire a compute slot. Called when the pool needs to grow to admit a queued appeal-worker.",
+          "request": {
+            "cluster": "$BACKSTOP_ECS_CLUSTER",
+            "taskDefinition": "$BACKSTOP_ECS_TASK_DEFINITION",
+            "count": "1 (one task per slot; max 10 per call so batches of >10 loop)",
+            "capacityProviderStrategy": "[{capacityProvider: FARGATE|FARGATE_SPOT, weight: 1, base: 0}]  (mutually exclusive with launchType; preferred so FARGATE_SPOT burst is possible)",
+            "launchType": "FARGATE (alternative to capacityProviderStrategy, not both)",
+            "platformVersion": "LATEST (>=1.4.0 required for FARGATE_SPOT ARM64)",
+            "networkConfiguration": {
+              "awsvpcConfiguration": {
+                "subnets": "$BACKSTOP_ECS_SUBNETS",
+                "securityGroups": "$BACKSTOP_ECS_SECURITY_GROUPS",
+                "assignPublicIp": "$BACKSTOP_ECS_ASSIGN_PUBLIC_IP"
+              }
+            },
+            "overrides": {
+              "containerOverrides": [
+                {
+                  "name": "$BACKSTOP_ECS_CONTAINER_NAME",
+                  "environment": [
+                    {
+                      "name": "BACKSTOP_SLOT_ID",
+                      "value": "<uuid>"
+                    },
+                    {
+                      "name": "BACKSTOP_APPEAL_ID",
+                      "value": "<appeal id, NON-PHI surrogate key only>"
+                    }
+                  ]
+                }
+              ]
+            },
+            "startedBy": "backstop-swarm (<=128 chars, used for ListTasks filtering)",
+            "clientToken": "<uuid> (idempotency: retried RunTask with same token will not double-launch)",
+            "tags": "[{key: app, value: backstop}, {key: pool, value: appeal-worker}]"
+          },
+          "response": {
+            "tasks": "[{taskArn, taskDefinitionArn, clusterArn, lastStatus(PROVISIONING|PENDING), desiredStatus(RUNNING), containers:[{name,lastStatus,...}], createdAt}]",
+            "failures": "[{arn, reason, detail}]  -- e.g. reason 'RESOURCE:FARGATE' when the account vCPU quota is exhausted; this is the signal to apply backpressure / fall back"
+          }
+        },
+        {
+          "op": "ecs.describe_tasks",
+          "purpose": "Poll slot health: confirm a launched task reached RUNNING (slot truly acquired) and detect STOPPED (slot freed / crashed).",
+          "request": {
+            "cluster": "$BACKSTOP_ECS_CLUSTER",
+            "tasks": "[<taskArn>, ...]  (up to 100 ARNs per call)"
+          },
+          "response": {
+            "tasks": "[{taskArn, lastStatus(PROVISIONING|PENDING|ACTIVATING|RUNNING|DEACTIVATING|STOPPING|DEPROVISIONING|STOPPED), desiredStatus, stopCode(TaskFailedToStart|EssentialContainerExited|UserInitiated|...), stoppedReason, containers:[{name,lastStatus,exitCode,reason}], startedAt, stoppedAt}]",
+            "failures": "[{arn(MISSING when task aged out of describe window), reason}]"
+          }
+        },
+        {
+          "op": "ecs.stop_task",
+          "purpose": "Release a slot = idle a worker. Called when an appeal finishes (success or terminal failure) so the pool drains toward zero.",
+          "request": {
+            "cluster": "$BACKSTOP_ECS_CLUSTER",
+            "task": "<taskArn>",
+            "reason": "backstop: appeal <id> complete (<=255 chars)"
+          },
+          "response": {
+            "task": "{taskArn, lastStatus, desiredStatus(STOPPED), ...}"
+          }
+        },
+        {
+          "op": "ecs.list_tasks",
+          "purpose": "Reconcile/recover live slot inventory after an orchestrator restart so the gate's notion of 'taken' matches reality (prevents leaked or double-counted slots).",
+          "request": {
+            "cluster": "$BACKSTOP_ECS_CLUSTER",
+            "startedBy": "backstop-swarm",
+            "desiredStatus": "RUNNING"
+          },
+          "response": {
+            "taskArns": "[<arn>, ...]",
+            "nextToken": "pagination"
+          }
+        },
+        {
+          "op": "servicequotas.get_service_quota",
+          "purpose": "Read the account's hard Fargate ceiling (quota code L-3032A538 'Fargate On-Demand vCPU resource count' in service code 'fargate') so the gate can cap BACKSTOP_MAX_CONCURRENCY below the real limit instead of failing RunTask under burst.",
+          "request": {
+            "ServiceCode": "fargate",
+            "QuotaCode": "L-3032A538"
+          },
+          "response": {
+            "Quota": "{Value: <float, e.g. 6.0 vCPU default>, Adjustable: true}"
+          }
+        }
+      ],
+      "sdk_or_lib": "boto3 / botocore for sync, aioboto3 (or asyncio loop.run_in_executor wrapping boto3) for the async swarm. Region from AWS_REGION; creds from the default botocore chain. No raw HTTP \u2014 all calls go through the SDK which handles SigV4, retries (configurable via botocore Config(retries={'max_attempts':N,'mode':'adaptive'})), and endpoint resolution.",
+      "notes": "DESIGN NOTE / honesty: AWS's load-bearing role here is CONCURRENCY ADMISSION, not running each appeal inside Fargate. The appeal logic (PAVO loop, Moss retrieval, etc.) runs in the orchestrator process; the Fargate task pool is the *capacity budget* that authorizes how many of those loops may run at once. So the real adapter's acquire() => RunTask+poll-to-RUNNING, release() => StopTask. CONFIDENCE: the ecs run_task/describe_tasks/stop_task/list_tasks request+response shapes, the FARGATE_SPOT capacityProviderStrategy constraint (mutually exclusive with launchType), the 'RESOURCE:FARGATE' quota-exhaustion failure reason, and SigV4/IAM actions are all confirmed against current boto3 docs. LESS CERTAIN, flagged: the exact Service Quotas QuotaCode L-3032A538 / ServiceCode 'fargate' string can drift by account/region \u2014 the real adapter must treat a quota-lookup miss as non-fatal and fall back to BACKSTOP_MAX_CONCURRENCY. Eventual consistency: a freshly-launched taskArn can briefly 404 in describe_tasks; poll with exponential backoff (2s\u2192max ~30s) before treating as failure. Cost/latency caveat: cold RunTask->RUNNING is ~10-60s, too slow to gate per-appeal on the hot path; production should keep a WARM pool (pre-launched idle tasks) and have acquire() check out a warm slot first, only calling RunTask to grow the pool \u2014 this is captured in the port via a separate ensure_capacity()/prewarm method so the per-appeal acquire() stays fast."
+    },
+    "port_name": "ConcurrencyGatePort (a.k.a. BurstCapacityPort) \u2014 file: orchestrator/backstop/ports/concurrency_gate.py",
+    "port_methods": [
+      {
+        "signature": "async def acquire(self, *, slot_key: str, timeout: float | None = None) -> Slot",
+        "purpose": "Block until a compute slot is available, then return an opened Slot handle. slot_key is a NON-PHI surrogate (e.g. appeal_id) used only for tracing/idempotency. Raises CapacityTimeout if timeout elapses before a slot frees. This is the call the swarm awaits before starting each appeal worker."
+      },
+      {
+        "signature": "async def release(self, slot: Slot) -> None",
+        "purpose": "Return a previously acquired slot to the pool (idempotent: releasing twice is a no-op). Real adapter StopTasks the backing Fargate task or returns it to the warm pool; sim adapter releases the semaphore. Always called in a finally/contextmanager so slots cannot leak on exception."
+      },
+      {
+        "signature": "async def __aenter__/__aexit__ via 'async with gate.slot(slot_key) as slot:'  -> AsyncContextManager[Slot]",
+        "purpose": "Ergonomic acquire+guaranteed-release wrapper (default-implemented on the port ABC in terms of acquire/release) so callers can't forget to release on the error path."
+      },
+      {
+        "signature": "async def ensure_capacity(self, *, target: int) -> int",
+        "purpose": "Pre-warm / scale the pool toward `target` ready slots (real: RunTask to grow warm pool up to min(target, max_concurrency, quota); sim: no-op returning min(target,max)). Returns the number of slots now provisionable. Lets the swarm pre-scale before a known batch instead of paying cold-start per appeal."
+      },
+      {
+        "signature": "async def capacity(self) -> CapacitySnapshot",
+        "purpose": "Return live gauge: CapacitySnapshot(max:int, in_use:int, available:int, warm:int, mode:'real'|'sim'). Powers the dashboard concurrency meter, the cost.py burn estimate, and backpressure decisions in the triage worklist."
+      },
+      {
+        "signature": "async def reconcile(self) -> int",
+        "purpose": "Recover true in-use count from the backend after an orchestrator restart (real: ListTasks startedBy=backstop-swarm; sim: returns current semaphore deficit). Returns reconciled in_use. Prevents leaked/double-counted slots across the no-graceful-shutdown vuln fix."
+      },
+      {
+        "signature": "async def aclose(self) -> None",
+        "purpose": "Graceful shutdown: stop accepting new acquires, StopTask all warm/idle slots (real) or drain the semaphore (sim). Wired into the FastAPI lifespan shutdown to fix the 'no graceful shutdown' vuln."
+      }
+    ],
+    "real_adapter": "File: orchestrator/backstop/adapters/aws/fargate_gate.py \u2014 class FargateConcurrencyGate(ConcurrencyGatePort). ONE responsibility: translate slot acquire/release into Fargate task pool operations. Construction (by the composition root only): takes an injected async ECS client (aioboto3 session client, or a boto3 client wrapped to run in a thread executor), the cluster/taskdef/subnets/sgs/container-name config, max_concurrency, capacity_provider, and a Clock + backoff policy (injected for testability). Holds an internal model: a set of warm (idle, RUNNING) taskArns and a set of in_use taskArns, guarded by an asyncio.Lock with SHORT critical sections (only mutating the sets \u2014 never holding the lock across an await on AWS, which fixes the 'lock-scope serializes the swarm' vuln). \\n\\nacquire(): (1) fast path \u2014 pop a warm taskArn under the lock and move it to in_use; return Slot(task_arn, slot_key). (2) slow path \u2014 if no warm slot and in_use < min(max_concurrency, discovered_quota): call ecs.run_task(count=1, capacityProviderStrategy=[{provider, weight:1, base:0}], networkConfiguration, overrides with BACKSTOP_SLOT_ID/APPEAL_ID env, clientToken=uuid for idempotency, startedBy='backstop-swarm'); then poll ecs.describe_tasks with exponential backoff (injected backoff, 2s\u2192~30s cap) until lastStatus==RUNNING; on success register taskArn as in_use and return Slot. (3) if at ceiling or run_task returns failures[].reason startswith 'RESOURCE:FARGATE' (quota exhausted), await on an asyncio.Condition that release() notifies \u2014 i.e. block for a freed slot until timeout, then raise CapacityTimeout. \\n\\nrelease(slot): under lock remove from in_use; policy = keep up to a small warm pool (configurable warm_keep), else ecs.stop_task(task=slot.task_arn, reason='backstop: appeal complete'); notify the Condition so a waiting acquire() proceeds. Idempotent via a released-set guard. \\n\\nensure_capacity(target): RunTask in batches of up to 10 (count param max) until warm+in_use == min(target, max, quota); cache the quota from servicequotas.get_service_quota(ServiceCode='fargate', QuotaCode='L-3032A538') on first call, treating any error as 'use max_concurrency'. \\n\\ncapacity(): snapshot the sets. reconcile(): ecs.list_tasks(startedBy='backstop-swarm', desiredStatus='RUNNING') paginated, then describe_tasks to classify warm vs in_use, rebuilding internal sets. aclose(): set a closed flag, stop_task all warm+in_use. \\n\\nAll boto exceptions are caught and remapped to domain errors (CapacityTimeout, CapacityBackendError) so the Service layer never sees botocore types \u2014 keeps the port abstraction clean. No PHI ever enters env overrides or tags (only the surrogate appeal_id and slot uuid).",
+    "sim_adapter": "File: orchestrator/backstop/adapters/aws/semaphore_gate.py \u2014 class SemaphoreConcurrencyGate(ConcurrencyGatePort). This is REAL local backpressure, not an echo: it is a genuine bounded concurrency gate the swarm actually blocks on. \\n\\nInternals: an asyncio.Semaphore(max_concurrency) plus an in_use counter and a warm counter, guarded by an asyncio.Lock. acquire(slot_key, timeout): await asyncio.wait_for(self._sem.acquire(), timeout) \u2014 if more than max_concurrency workers try to enter, the (max+1)th genuinely SUSPENDS until a release() frees a permit (provably observable in tests: launch max+1 tasks, assert exactly max make progress and the last only proceeds after a release). On success increment in_use, return Slot(token=uuid, slot_key, backend='sim'). On timeout raise CapacityTimeout (same domain exception the real adapter raises \u2014 so the Service behaves identically). \\n\\nrelease(slot): idempotent (track released tokens in a set); decrement in_use, self._sem.release(). ensure_capacity(target): clamp and return min(target, max_concurrency) (pre-warm is free in-process \u2014 no-op but honest about the ceiling). capacity(): CapacitySnapshot(max, in_use, available=max-in_use, warm=0, mode='sim'). reconcile(): returns current in_use (in-process truth is authoritative; nothing to recover). aclose(): set closed flag so further acquires raise; drain semaphore. \\n\\nBecause it shares the exact Slot/CapacitySnapshot/CapacityTimeout contract and real blocking semantics, the sim is a faithful test double for the real adapter and is also the production fallback when AWS_* creds are absent \u2014 giving genuine OOM/overload protection (directly mitigating the 'no concurrency cap' and 'threadpool starvation' High vulns) even with no cloud.",
+    "wiring": "Composition root: orchestrator/backstop/composition.py (DI container) reads BACKSTOP integration mode + AWS_* env. If real creds + cluster config present AND mode=real -> instantiate FargateConcurrencyGate with an injected aioboto3 ECS client; else -> SemaphoreConcurrencyGate(max_concurrency=BACKSTOP_MAX_CONCURRENCY). The chosen ConcurrencyGatePort instance is a process-wide SINGLETON registered in the container and injected into SwarmService. \\n\\nPrimary invocation \u2014 swarm.py / SwarmService.run_appeal_batch(): the concurrent orchestrator currently fans out one asyncio task per appeal with no cap. Rewired: for each appeal, the worker coroutine does `async with self.gate.slot(slot_key=appeal.id) as slot: await self._run_appeal(appeal)`. The gate is acquired BEFORE the per-appeal PAVO/call.py loop begins and released in the context-manager exit (success or exception) \u2014 this replaces the leaky fire-and-forget pattern and enforces the global concurrency ceiling. Optionally SwarmService calls gate.ensure_capacity(target=len(batch)) once at batch start to pre-warm. \\n\\nSecondary wiring: (1) FastAPI lifespan startup calls gate.reconcile() to recover live slots after restart; shutdown calls gate.aclose() (fixes 'no graceful shutdown' + 'fire-and-forget tasks'). (2) The dashboard/status route and cost.py read gate.capacity() for the live concurrency meter and burst-cost estimate. (3) The triage worklist / batch-ingestion service consults gate.capacity().available to throttle how fast it enqueues 835/837 backlog appeals (backpressure into the NOW feature bucket). \\n\\nLayering respected: Controller (server.py route / WS handler) -> SwarmService (use-case) -> ConcurrencyGatePort -> {FargateConcurrencyGate | SemaphoreConcurrencyGate} adapter. The Service depends only on the port; adapters are injected by composition.py. The gate never sees PHI \u2014 it only receives the surrogate appeal id as slot_key.",
+    "tests": [
+      {
+        "file": "tests/ports/test_concurrency_gate_contract.py",
+        "type": "contract",
+        "purpose": "Shared contract suite parametrized over BOTH adapters (fixture yields SemaphoreConcurrencyGate AND a FargateConcurrencyGate backed by a fake ECS client) so real and sim are proven behaviorally interchangeable behind the port.",
+        "cases": [
+          "acquire() returns a Slot whose slot_key matches the requested key",
+          "acquiring max_concurrency slots all succeed; the (max+1)th acquire BLOCKS and only completes after a release() (assert via asyncio.wait + timeout that it is pending, then release and assert it resolves)",
+          "acquire(timeout=short) on a full gate raises CapacityTimeout (identical exception type from both adapters)",
+          "release() is idempotent \u2014 releasing the same slot twice frees exactly one permit, not two",
+          "'async with gate.slot(k)' releases the slot even when the body raises (assert capacity().in_use returns to baseline)",
+          "capacity() invariant after every op: available == max - in_use and 0 <= in_use <= max",
+          "ensure_capacity(target) never reports more than max_concurrency",
+          "reconcile() returns the current in_use count and leaves the gate usable",
+          "aclose() then acquire() raises (closed gate refuses new work)"
+        ]
+      },
+      {
+        "file": "tests/adapters/aws/test_semaphore_gate.py",
+        "type": "unit (sim adapter)",
+        "purpose": "Prove the sim does REAL backpressure, not an echo.",
+        "cases": [
+          "Launch 50 worker coroutines against max_concurrency=10; at the synchronized peak assert exactly 10 are inside the gate simultaneously and 40 are suspended (instrument an in-body counter with a max-observed assertion)",
+          "Total wall-clock of N>max uniform-duration jobs >= ceil(N/max)*job_duration (serialization is real, measured against an injected fake clock)",
+          "release() wakes exactly one waiter (FIFO-ish fairness smoke test)",
+          "no permit leak: after running 1000 acquire/release pairs, capacity().in_use == 0"
+        ]
+      },
+      {
+        "file": "tests/adapters/aws/test_fargate_gate.py",
+        "type": "unit (real adapter, fake ECS client \u2014 NO live AWS)",
+        "purpose": "Drive the real adapter against an injected fake/mocked boto ECS client (handwritten fake or moto/botocore Stubber) asserting it issues the correct calls and handles AWS edge cases.",
+        "cases": [
+          "acquire() with empty warm pool calls run_task once with the expected kwargs: count=1, capacityProviderStrategy=[{capacityProvider:<cfg>,weight:1,base:0}], networkConfiguration.awsvpcConfiguration.{subnets,securityGroups,assignPublicIp}, overrides env contains BACKSTOP_APPEAL_ID and NO PHI, startedBy='backstop-swarm', and a clientToken is set",
+          "acquire() polls describe_tasks until lastStatus transitions PENDING->RUNNING before returning (fake returns PENDING twice then RUNNING; assert backoff sleeps were awaited via injected clock)",
+          "run_task returning failures=[{reason:'RESOURCE:FARGATE'}] (quota exhausted) does NOT crash \u2014 it blocks for a freed slot and times out as CapacityTimeout",
+          "warm-pool reuse: release() with warm_keep>0 retains the taskArn and the NEXT acquire() reuses it WITHOUT calling run_task again",
+          "release() beyond warm_keep calls stop_task(task=<arn>, reason startswith 'backstop')",
+          "describe_tasks transiently reporting the task as MISSING/failures is retried with backoff, not treated as terminal (eventual-consistency case)",
+          "reconcile() calls list_tasks(startedBy='backstop-swarm') with pagination and rebuilds in_use/warm sets from describe_tasks",
+          "quota lookup via servicequotas raising an error is swallowed and the gate falls back to BACKSTOP_MAX_CONCURRENCY",
+          "all botocore ClientError exceptions surface as domain CapacityBackendError, never raw botocore types",
+          "lock is never held across an await to AWS (regression test: two concurrent acquires both reach run_task without one being serialized behind the other's network call)"
+        ]
+      },
+      {
+        "file": "tests/services/test_swarm_uses_gate.py",
+        "type": "unit (use-case wiring)",
+        "purpose": "Prove SwarmService actually gates every appeal through the port (so AWS is load-bearing, not decorative).",
+        "cases": [
+          "run_appeal_batch with a sim gate of max=2 and 5 appeals: assert no more than 2 appeals' _run_appeal bodies execute concurrently (spy)",
+          "every appeal acquires before its PAVO loop and releases after, even when one appeal raises (assert gate.capacity().in_use==0 at end)",
+          "SwarmService is constructed with the port injected (DI), and swapping in the Fargate-fake gate runs the identical batch flow unchanged \u2014 proving the Service depends only on the port"
+        ]
+      },
+      {
+        "file": "tests/composition/test_gate_selection.py",
+        "type": "unit (composition root)",
+        "purpose": "Verify the DI container picks the right adapter from env without doing any real network/AWS work.",
+        "cases": [
+          "mode=sim or missing AWS_* -> SemaphoreConcurrencyGate with max==BACKSTOP_MAX_CONCURRENCY",
+          "mode=real + full AWS_* + cluster config -> FargateConcurrencyGate (constructed with a stubbed client; no live call)",
+          "the gate is a singleton (two resolves return the same instance)"
+        ]
+      }
+    ]
+  }
+]

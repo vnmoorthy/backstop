@@ -1,0 +1,1791 @@
+{
+  "layering": [
+    "CANONICAL DECISION: Adopt Proposal #1's LAYER-GROUPED hexagon (technical-axis: domain/ ports/ adapters/ services/ controllers/ infra/ composition/) as the file-tree backbone because it (a) literally matches the user's mandate 'Controller -> Service -> Port -> Adapter, wired by a composition root', (b) keeps the file count and the single composition root simpler than #2's two-tier per-slice roots, (c) preserves the user's existing orchestrator/backstop/ path + pavo/router.py convention. IMPORT from Proposal #2 (the genuinely better ideas): PHI-as-a-type (RedactedText newtype the egress ports structurally require), Money/SolDeadline integer-cents value objects for triage, the tamper-evident audit chain + cost ledger modeled as SHARED ports every service consumes (not re-implemented per feature), and an explicit domain state-machine on the Appeal aggregate (DENIED->TRIAGED->IN_APPEAL->AWAITING_SIGNOFF->FILED/ABANDONED) so the cross-feature pipeline is encoded as aggregate transitions, NOT slice-to-slice service calls.",
+    "Six layers, strict one-way dependency (a layer may import only layers below it; adapters never import services/controllers; domain imports nothing): L1 domain (pure entities, value objects, enums, errors, RedactedText, triage/routing pure math) -> L2 ports (abstract Protocol/ABC interfaces + their request/result DTOs; the ONLY thing services depend on) -> L3 adapters (real + sim implementations of one port each; real adapters own all vendor SDK/HTTP; sim adapters do REAL local work) and infra (config, http client, db engine, logging, security headers) -> L4 services (use-cases; depend ONLY on ports + domain + an injected Clock/IdGen) -> L5 controllers (FastAPI HTTP/WS edge; depend on services via DI; never construct anything) -> composition root (the ONE impure wiring file graph: reads Settings, builds every adapter by mode, assembles services, returns an immutable Container; owns the FastAPI lifespan).",
+    "PAVO exception to real/sim symmetry: RoutingPort is the one capability whose composition factory has a real (torch) and a sim (numpy) adapter that are POLICY-IDENTICAL (bit-faithful: verified 0/2000 argmax mismatches, 1.9e-6 max logit error against the live checkpoint) \u2014 the numpy adapter is NOT a degraded fake, it is the same frozen policy on a torch-free backend, usable as production fallback AND test double. PAVO weights/policy are frozen: adapters wrap inference only, never call .train(), never alter turn_to_state_vector defaults or the 48->3 collapse thresholds.",
+    "PHI redaction boundary is structural, not conventional: every egress port (LetterRenderPort, EventBusPort/WS, AuditLogPort, FileStorePort, TtsPort, ReasoningPort outbound, RetrievalPort outbound) accepts ONLY domain.redacted.RedactedText for its PHI-bearing fields. A service cannot hand raw str to an egress port without first passing it through RedactionPort (TrueFoundry), which is the sole producer of RedactedText. This makes the six PHI-leak Critical/High vulns a type error at the boundary, with runtime defense-in-depth assertions in each egress adapter.",
+    "The only file permitted to read os.environ is infra/config.py (a frozen pydantic-settings Settings). The only files permitted to import a vendor SDK/torch/httpx are the real adapters + infra/http_client.py + the PAVO adapters. An architecture guard test (tests/arch/test_layering.py) statically asserts both invariants so the global-state-coupling and single-LLM-chokepoint rules cannot silently regress.",
+    "Async-first hot path: the per-turn loop (CallService) and swarm fan-out (SwarmService) are fully async; the concurrency cap (ConcurrencyGatePort) is acquired per-appeal via 'async with gate.slot(appeal_id)'; the appeal repo lock is held only across in-memory dict/row mutation (never across an await to a vendor), so routing/retrieval/reasoning happen lock-free \u2014 fixing the lock-scope-serializes-the-swarm and threadpool-starvation vulns."
+  ],
+  "ports": [
+    {
+      "name": "RoutingPort",
+      "sponsor": "PAVO",
+      "file": "orchestrator/backstop/ports/routing_port.py",
+      "methods": [
+        "route(obs: TurnObservation) -> RoutingDecision  # pure, sync, deterministic argmax of frozen MLP; the one load-bearing per-turn call",
+        "explain(obs: TurnObservation) -> RoutingExplanation  # decision + profile_idx, top-k logits, softmax confidence, value-head scalar, coupling-mask flag; feeds the evidence timeline",
+        "is_feasible(tier: ModelTier, obs: TurnObservation) -> bool  # exposes coupling-mask constraint; mirrors _profile_costs.infeasible_for_turn (ondevice_fast & complexity>=4 -> infeasible)",
+        "tiers() -> tuple[ModelTier, ...]  # stable ordered vocabulary (CLOUD_PREMIUM, HYBRID_BALANCED, ONDEVICE_FAST)"
+      ],
+      "real_adapter": "adapters/pavo/torch_routing_adapter.py :: TorchPavoRoutingAdapter \u2014 wraps pavo_bench.load_pretrained + PretrainedPAVORouter; constructed once; thread-safe under torch.no_grad/eval; NO key, NO network, NO PHI",
+      "sim_adapter": "adapters/pavo/numpy_routing_adapter.py :: NumpyPavoRoutingAdapter \u2014 pure-numpy reimplementation of the SAME MLP forward over the SAME vendored weights (bit-faithful: 0/2000 argmax mismatch, 1.9e-6 logit err). Production fallback for torch-less hosts AND canonical test double. Shared turn_to_state_vector copy + 48->3 collapse live in adapters/pavo/_coupling.py imported by both.",
+      "keys": [
+        "NONE (no API key, no network)",
+        "PAVO_WEIGHTS_PATH (optional)",
+        "PAVO_BENCH_ROOT (optional)",
+        "PAVO_DEVICE (optional, default cpu)",
+        "PAVO_ADAPTER_IMPL (optional, default torch -> real; numpy -> sim)"
+      ],
+      "phi": "none \u2014 pure telemetry (snr, cpu, battery, rtt, complexity, ctx_tokens). Sits on the redacted side of the boundary by construction."
+    },
+    {
+      "name": "RetrievalPort",
+      "sponsor": "Moss",
+      "file": "orchestrator/backstop/ports/retrieval_port.py",
+      "methods": [
+        "async retrieve(query: RetrievalQuery) -> RetrievalResult  # ranked EvidenceChunks with provenance; bounded by query.timeout_s; raises domain RetrievalError (never httpx)",
+        "async health() -> RetrievalHealth  # ok + mode('real'|'sim') for the dashboard badge; never raises"
+      ],
+      "real_adapter": "adapters/moss/moss_http_adapter.py :: MossHttpAdapter \u2014 POST {base}/v1/query, project-scoped auth (Authorization: Bearer MOSS_PROJECT_KEY + X-Moss-Project: MOSS_PROJECT_ID), injected httpx.AsyncClient, one bounded tenacity retry on 5xx/timeout, maps results[]->EvidenceChunk normalized score 0..1; asserts no-PHI in outbound query (defense-in-depth).",
+      "sim_adapter": "adapters/moss/tfidf_retrieval_adapter.py :: LocalTfidfRetrievalAdapter \u2014 REAL TF-IDF + cosine over data/runbooks/*.md chunks; index fit ONCE at composition root; different denial reasons surface different runbooks (genuine ranking, not echo). DECISION: implement TF-IDF in a stdlib RunbookCorpus util (no hard sklearn dep, since sklearn is absent on the host); sklearn optional accelerator behind the same interface.",
+      "keys": [
+        "MOSS_PROJECT_ID",
+        "MOSS_PROJECT_KEY",
+        "MOSS_BASE_URL (optional, default https://api.usemoss.dev)",
+        "MOSS_TIMEOUT_S (optional, default 2.0)"
+      ],
+      "phi": "query is built from denial context (CARC/RARC, payer, CPT, place-of-service) ONLY \u2014 never member IDs. Service redacts upstream; adapter re-asserts PHI-clean."
+    },
+    {
+      "name": "LLMGatewayPort",
+      "sponsor": "TrueFoundry",
+      "file": "orchestrator/backstop/ports/llm_gateway_port.py",
+      "methods": [
+        "async complete(request: LLMRequest) -> LLMResponse  # THE single LLM chokepoint: redact-out -> upstream -> redact-in -> hash-chained audit append -> priced cost record -> PHI-free LLMResponse",
+        "async stream(request: LLMRequest) -> AsyncIterator[LLMChunk]  # per-sentence-boundary redaction buffering; final chunk carries usage + closed audit record",
+        "health() -> GatewayHealth  # real: GET models_list, assert DEFAULT_MODEL authorized; sim: ready",
+        "cost_to_date(appeal_id: str | None = None) -> CostSnapshot  # read-through to the cost ledger; powers triage worklist + per-appeal timeline"
+      ],
+      "real_adapter": "adapters/truefoundry/tf_gateway_adapter.py :: TrueFoundryGatewayAdapter \u2014 OpenAI-compatible POST {base}{INFERENCE_PATH}/chat/completions, Authorization: Bearer TRUEFOUNDRY_API_KEY, X-TFY-METADATA={appeal_id,stage}; injected RedactionPort+AuditPort+CostLedgerPort (same instances as sim); bounded retry on 429/5xx honoring Retry-After; raises GatewayError. INFERENCE_PATH + base_url env-configurable (vendor surface drift).",
+      "sim_adapter": "adapters/truefoundry/sim_gateway_adapter.py :: SimGatewayAdapter \u2014 runs the SAME real RedactionPort/AuditPort/CostLedgerPort; only the model proxy is local (deterministic seeded template+TF-IDF composer over data/runbooks per stage); REAL token-count (tiktoken if present else word/4) + REAL priced cost + REAL hash-chained audit. Not an echo.",
+      "keys": [
+        "TRUEFOUNDRY_API_KEY",
+        "TRUEFOUNDRY_BASE_URL",
+        "TRUEFOUNDRY_DEFAULT_MODEL",
+        "TFY_MODE (real|sim)",
+        "TFY_TENANT (optional)"
+      ],
+      "phi": "this IS the redaction boundary: redacts on the way out AND back; stores SHA-256 hashes of redacted text in audit, never raw; never logs message bodies; never writes PHI to disk."
+    },
+    {
+      "name": "RedactionPort",
+      "sponsor": "TrueFoundry (PHI sub-capability, own file)",
+      "file": "orchestrator/backstop/ports/redaction_port.py",
+      "methods": [
+        "redact_text(text: str) -> RedactedText  # masks member IDs, NPIs, SSNs, claim #s, DOBs, names, addresses, phones; returns RedactedText + salted-hash placeholder map (never raw PHI)",
+        "redact_messages(messages: list[Message]) -> list[Message]  # message-aware redaction for LLM payloads",
+        "contains_phi(text: str) -> bool  # cheap guard used by egress adapters as defense-in-depth"
+      ],
+      "real_adapter": "adapters/truefoundry/tf_redaction_adapter.py :: TrueFoundryRedactionAdapter (real mode; may call TFY guardrails if enabled, else local ruleset \u2014 capability does not depend on the remote)",
+      "sim_adapter": "adapters/truefoundry/local_redaction_adapter.py :: LocalRedactionAdapter \u2014 REAL presidio-style regex+context PHI scrubbing (fixes the incomplete redact_phi High finding); hypothesis-fuzzed to never leak member/NPI/SSN/DOB/claim patterns. This is the single producer of RedactedText.",
+      "keys": [
+        "TRUEFOUNDRY_API_KEY (shared; local ruleset needs none)"
+      ],
+      "phi": "the redaction engine itself \u2014 the structural chokepoint that converts str -> RedactedText."
+    },
+    {
+      "name": "AuditLogPort",
+      "sponsor": "TrueFoundry (audit sub-capability)",
+      "file": "orchestrator/backstop/ports/audit_log_port.py",
+      "methods": [
+        "append(record: AuditRecord) -> str  # tamper-evident: each record's prev_hash = sha256 of prior; stores hashes not raw text; returns audit_id",
+        "verify_chain(appeal_id: str | None = None) -> bool  # detects tampering; the sign-off gate REQUIRES True before a signature is accepted",
+        "iter(appeal_id: str) -> Iterable[AuditRecord]  # read-only, for the evidence timeline"
+      ],
+      "real_adapter": "adapters/truefoundry/hashchain_audit_adapter.py :: HashChainAuditAdapter \u2014 SQLite append-only audit table (production); shared by real+sim gateway",
+      "sim_adapter": "same adapter writing to an in-memory/JSONL append-only sink (the audit chain is REAL in sim \u2014 only the LLM proxy differs)",
+      "keys": [
+        "(none beyond TRUEFOUNDRY_API_KEY for optional remote mirror)"
+      ],
+      "phi": "write-only from services; stores SHA-256 hashes + redaction_count + token/cost metadata, never raw PHI."
+    },
+    {
+      "name": "CostLedgerPort",
+      "sponsor": "TrueFoundry (cost sub-capability)",
+      "file": "orchestrator/backstop/ports/cost_ledger_port.py",
+      "methods": [
+        "record(appeal_id, stage, model, prompt_tokens, completion_tokens) -> Money  # prices via per-model USD/1K table from config; returns cost",
+        "snapshot(appeal_id: str | None = None) -> CostSnapshot  # {prompt_tokens, completion_tokens, usd, n_calls}",
+        "record_chars(appeal_id, vendor, chars) -> Money  # per-char meters (Qwen TTS)"
+      ],
+      "real_adapter": "adapters/truefoundry/cost_ledger_adapter.py :: CostLedgerAdapter \u2014 SQLite ledger table; same price table for real+sim so dashboard numbers are comparable",
+      "sim_adapter": "same adapter, in-memory aggregation (cost is genuinely computed, never faked/zero)",
+      "keys": [
+        "(uses config price table; no extra key)"
+      ],
+      "phi": "none \u2014 token counts + surrogate appeal_id only."
+    },
+    {
+      "name": "DenialParserPort",
+      "sponsor": "Unsiloed",
+      "file": "orchestrator/backstop/ports/denial_parser_port.py",
+      "methods": [
+        "async parse(artifact: ParseRequest) -> DenialExtraction  # bytes+mime OR raw EDI text OR url + ArtifactKind -> structured Denial fields with per-field ExtractedField provenance + overall_confidence + needs_human_review",
+        "supports(kind: ArtifactKind) -> bool  # real: True for EOB/CMS1500/UB04/PDF images, False for raw EDI; sim: True for ALL (universal fallback)"
+      ],
+      "real_adapter": "adapters/unsiloed/unsiloed_http_adapter.py :: UnsiloedDenialParserAdapter \u2014 async POST /v2/extract (multipart: file bytes + stringified Denial JSON Schema) then GET /extract/{job_id} poll (NOTE the asymmetry: create=POST /v2/extract, poll=GET /extract/{id} no v2), header api-key (NOT Bearer), base https://prod.visionapi.unsiloed.ai (env-overridable UNSILOED_BASE_URL); maps flat field-map {value,score,bboxes,page_no} -> ExtractedField, min_confidence_score -> overall_confidence; refuses raw EDI (UnsupportedArtifact). Ships only in-memory validated bytes, never a server-side path (fixes arbitrary-file-read Critical).",
+      "sim_adapter": "adapters/unsiloed/deterministic_parser_adapter.py :: DeterministicDenialParserAdapter \u2014 REAL local work, two engines: (A) X12 parser for 835/837/277 (splits on ~ and *, walks ISA/GS/ST, reads CLP/NM1/DTM/CAS/MIA/MOA/SVC; confidence 1.0), (B) regex+layout heuristic for EOB/CMS-1500/UB-04 text + a carc_table.py CARC/RARC code->reason map (confidence 0.6-0.9). Load-bearing in production for ALL EDI (Unsiloed is image-only).",
+      "keys": [
+        "UNSILOED_API_KEY",
+        "UNSILOED_BASE_URL (optional, default https://prod.visionapi.unsiloed.ai)",
+        "UNSILOED_MODE (real|sim)",
+        "UNSILOED_CONFIDENCE_FLOOR (optional, default 0.85)"
+      ],
+      "phi": "synthetic in this build; the Service wraps the call with the AuditLog/Redaction boundary so production PHI is redacted-logged; api-key and member_id never appear in logs."
+    },
+    {
+      "name": "ReasoningPort",
+      "sponsor": "MiniMax",
+      "file": "orchestrator/backstop/ports/reasoning_port.py",
+      "methods": [
+        "async compose_line(req: ComposeLineRequest) -> ComposeLineResult  # ONE grounded spoken line strictly from evidence+call_state; returns line, dialog_act, citations (subset of supplied evidence ids \u2014 never fabricated), grounded:bool, confidence; refuses (grounded=False + safe fallback) on insufficient evidence",
+        "async interpret_denial(req: InterpretDenialRequest) -> DenialInterpretation  # ambiguous denial text -> category, CARC/RARC, rebuttal_hook, recommended_route(appeal|resubmit|peer_to_peer|request_records), next_dialog_act, ambiguous:bool",
+        "async health() -> PortHealth"
+      ],
+      "real_adapter": "adapters/minimax/minimax_adapter.py :: MiniMaxReasoningAdapter \u2014 native POST /v1/text/chatcompletion_v2?GroupId=MINIMAX_GROUP_ID (Authorization: Bearer), base https://api.minimax.io/v1; MUST check base_resp.status_code != 0 even on HTTP 200; OpenAI-compat /v1/chat/completions fallback by MINIMAX_ROUTE flag; typed errors (MiniMaxTransportError/ApiError/ParseError); assumes inbound already PHI-redacted; never logs bodies.",
+      "sim_adapter": "adapters/minimax/local_reasoning_adapter.py :: MiniMaxSimReasoningAdapter \u2014 REAL grounded-NLG: TF-IDF rank evidence (shared text util with Moss sim), rule-table dialog_act selection, vetted audit-safe slot-filling templates; interpret_denial via a curated data/carc_rarc.json lexicon + keyword matching. Different inputs -> different grounded lines; deterministic.",
+      "keys": [
+        "MINIMAX_API_KEY",
+        "MINIMAX_GROUP_ID",
+        "MINIMAX_BASE_URL (optional)",
+        "MINIMAX_MODEL (optional)",
+        "MINIMAX_MODE (real|sim)",
+        "MINIMAX_ROUTE (native|openai, optional)"
+      ],
+      "phi": "receives only de-identified text; redaction enforced upstream by RedactionPort; MiniMax is never a PHI sink."
+    },
+    {
+      "name": "SpeechSynthesisPort",
+      "sponsor": "Qwen/DashScope",
+      "file": "orchestrator/backstop/ports/speech_synthesis_port.py",
+      "methods": [
+        "async synth(req: SynthRequest) -> SynthResult  # whole-line; returns a VALID playable RIFF/WAVE PCM container (real samples) for BOTH adapters + duration_ms + cost_chars",
+        "async synth_stream(req: SynthRequest) -> AsyncIterator[AudioFrame]  # low-latency frames for LiveKit; supports cancellation (nurse barge-in)",
+        "async health() -> PortHealth  # real: confirm cloned voice_id status OK"
+      ],
+      "real_adapter": "adapters/qwen/qwen_tts_adapter.py :: QwenTtsAdapter \u2014 POST /api/v1/services/aigc/multimodal-generation/generation (Authorization: Bearer DASHSCOPE_API_KEY), region-selected base (dashscope-intl/dashscope), fetch output.audio.url bytes (24h expiry \u2014 never hand URL downstream) OR decode inline base64 preview; validate via stdlib wave; WSS /api-ws/v1/realtime for synth_stream (PCM_24000HZ_MONO_16BIT deltas); typed SynthError(auth|rate_limit|expired_url|malformed_audio|timeout).",
+      "sim_adapter": "adapters/qwen/sim_tts_adapter.py :: SimTtsAdapter \u2014 REAL local DSP (stdlib math/struct/wave): duration scales with text (~165 wpm), per-char pseudo-formant generator seeded by hash(voice_id+text) for deterministic byte-identical output, ADSR envelope + inter-word silence, proper RIFF/WAVE header. NOT a 24-byte stub \u2014 a genuine voice-like, length-correct WAV.",
+      "keys": [
+        "QWEN_API_KEY (alias)",
+        "DASHSCOPE_API_KEY (canonical)",
+        "QWEN_REGION (optional, default intl)",
+        "QWEN_TTS_MODEL (optional)",
+        "QWEN_VOICE_ID (optional)",
+        "QWEN_MODE (real|sim)"
+      ],
+      "phi": "third-party, NO BAA \u2014 text MUST be RedactedText before reaching this port; VoiceTurnService asserts PHI-clean; DataInspection disabled."
+    },
+    {
+      "name": "VoiceTransportPort",
+      "sponsor": "LiveKit",
+      "file": "orchestrator/backstop/ports/voice_transport_port.py",
+      "methods": [
+        "async open_channel(call_id, *, max_participants=4, ttl=15min, metadata=None) -> Channel  # idempotent (room=appeal-{call_id}); returns agent join token (join-scoped, NOT admin)",
+        "mint_join_token(*, channel_id, identity, display_name, can_publish=True, can_subscribe=True, ttl=15min, admin=False) -> JoinToken  # pure HS256 crypto, no I/O",
+        "async bridge_nurse(*, channel_id, nurse_id, can_publish=True, ttl=5min) -> JoinToken  # barge-in; validates channel live (ChannelNotFound otherwise)",
+        "async list_participants(channel_id) -> list[Participant]",
+        "async remove_participant(*, channel_id, identity) -> None",
+        "async close_channel(channel_id) -> None  # idempotent (fixes never-cleaned transport leaks)",
+        "verify_token(token) -> Claims  # signature-verify incoming participant/nurse tokens at the edge (no trusting client identity)",
+        "async aclose() -> None  # graceful shutdown of the SDK client"
+      ],
+      "real_adapter": "adapters/livekit/livekit_adapter.py :: LiveKitVoiceTransportAdapter \u2014 livekit-api SDK; tokens are local HS256 crypto (no network); RoomService over Twirp at LIVEKIT_URL host; maps vendor/Twirp errors to domain ChannelNotFound/TransportError; short TTLs (15m agent / 5m nurse) bound PHI exposure.",
+      "sim_adapter": "adapters/livekit/inprocess_transport_adapter.py :: InProcessVoiceTransportAdapter \u2014 REAL in-process asyncio pub/sub fabric (per-participant asyncio.Queue, publish fans out to others) + REAL HS256 JWTs via PyJWT (byte-compatible claim shape, passes the SAME token contract tests) + real join/barge-in/eject/max-participant backpressure. Genuine transport, not an echo.",
+      "keys": [
+        "LIVEKIT_URL",
+        "LIVEKIT_API_KEY",
+        "LIVEKIT_API_SECRET",
+        "LIVEKIT_MODE (real|sim)",
+        "LIVEKIT_SIM_SECRET (dev secret for sim JWT signing)"
+      ],
+      "phi": "tokens never logged; only claim metadata (identity, room, exp) goes to the audit port; metadata carries no PHI."
+    },
+    {
+      "name": "ConcurrencyGatePort",
+      "sponsor": "AWS",
+      "file": "orchestrator/backstop/ports/concurrency_gate_port.py",
+      "methods": [
+        "async acquire(*, slot_key, timeout=None) -> Slot  # block until a compute slot frees; slot_key is a NON-PHI surrogate (appeal_id); raises CapacityTimeout",
+        "async release(slot) -> None  # idempotent",
+        "slot(slot_key) -> AsyncContextManager[Slot]  # 'async with gate.slot(k) as slot:' guaranteed-release wrapper, default-implemented on the ABC",
+        "async ensure_capacity(*, target) -> int  # pre-warm pool toward target (real: RunTask to grow warm pool; sim: no-op returning min(target,max))",
+        "async capacity() -> CapacitySnapshot  # {max,in_use,available,warm,mode} for dashboard meter + backpressure",
+        "async reconcile() -> int  # recover true in_use after restart (real: ListTasks startedBy=backstop-swarm; sim: current count)",
+        "async aclose() -> None  # graceful shutdown: stop accepting acquires, drain/StopTask"
+      ],
+      "real_adapter": "adapters/aws/fargate_gate.py :: FargateConcurrencyGate \u2014 acquire=warm-slot-pop-or-RunTask+poll-to-RUNNING, release=StopTask-or-return-to-warm-pool; asyncio.Lock held ONLY across set mutation (never across an AWS await \u2014 fixes lock-scope vuln); maps botocore errors to CapacityTimeout/CapacityBackendError; servicequotas lookup non-fatal -> falls back to BACKSTOP_MAX_CONCURRENCY; clientToken idempotency.",
+      "sim_adapter": "adapters/aws/semaphore_gate.py :: SemaphoreConcurrencyGate \u2014 REAL asyncio.Semaphore(max) backpressure: the (max+1)th acquire genuinely SUSPENDS until a release (provable in tests); same Slot/CapacitySnapshot/CapacityTimeout contract. Production fallback when AWS_* absent; fixes no-concurrency-cap + threadpool-starvation Highs.",
+      "keys": [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_REGION",
+        "AWS_SESSION_TOKEN (optional)",
+        "BACKSTOP_ECS_CLUSTER",
+        "BACKSTOP_ECS_TASK_DEFINITION",
+        "BACKSTOP_ECS_SUBNETS",
+        "BACKSTOP_ECS_SECURITY_GROUPS",
+        "BACKSTOP_ECS_CONTAINER_NAME",
+        "BACKSTOP_MAX_CONCURRENCY (default 200)",
+        "BACKSTOP_ECS_CAPACITY_PROVIDER (default FARGATE)",
+        "BACKSTOP_MODE (real|sim)"
+      ],
+      "phi": "never sees PHI \u2014 only the surrogate appeal_id as slot_key."
+    },
+    {
+      "name": "IvrPort",
+      "sponsor": "(in-house, sim-only by honesty contract)",
+      "file": "orchestrator/backstop/ports/ivr_port.py",
+      "methods": [
+        "async dial(number) -> IvrSession",
+        "async navigate(session, dtmf) -> IvrState  # menu-tree traversal, hold-vs-human detection",
+        "async hangup(session) -> None"
+      ],
+      "real_adapter": "(NONE \u2014 honesty contract: the swarm never dials a real payer line. A 'sandbox' real adapter targets only a synthetic sandbox IVR.)",
+      "sim_adapter": "adapters/ivr/ivr_sim_adapter.py :: IvrSimAdapter \u2014 REAL deterministic IVR state machine (DTMF navigation, holds, transfers) lifted from the existing ivr_sim.py",
+      "keys": [
+        "(none)"
+      ],
+      "phi": "synthetic only; never a real payer."
+    },
+    {
+      "name": "AppealRepositoryPort",
+      "sponsor": "(persistence)",
+      "file": "orchestrator/backstop/ports/appeal_repository_port.py",
+      "methods": [
+        "async save(appeal: Appeal) -> None  # atomic upsert",
+        "async load(appeal_id) -> Appeal  # raises AppealNotFound",
+        "async list(filter, limit, offset) -> list[Appeal]",
+        "async update_status_atomic(appeal_id, expected, new) -> bool  # compare-and-set for the sign-off state machine (fixes snapshot-watchdog race)",
+        "async append_event(appeal_id, event) -> None  # append-only evidence timeline"
+      ],
+      "real_adapter": "adapters/persistence/sqlite_appeal_repo.py :: SqliteAppealRepo \u2014 SQLite WAL, atomic transactional updates, row caps; replaces the unbounded global APPEALS dict (fixes OOM Critical/High)",
+      "sim_adapter": "adapters/persistence/memory_appeal_repo.py :: MemoryAppealRepo \u2014 bounded LRU + TTL eviction (capacity-limited, eviction-tested, NOT an unbounded dict)",
+      "keys": [
+        "DATABASE_URL (optional, default sqlite file path)"
+      ],
+      "phi": "PHI stored redacted-at-rest where possible; raw artifacts only behind FileStorePort scope tokens."
+    },
+    {
+      "name": "FileStorePort",
+      "sponsor": "(artifact storage)",
+      "file": "orchestrator/backstop/ports/file_store_port.py",
+      "methods": [
+        "async put(bytes, *, scope, ttl) -> ArtifactRef  # returns a scoped ref, not a raw path",
+        "async get_signed_url(ref, *, principal) -> str  # short-lived signed URL; authorizes per-appeal ownership",
+        "async open(ref, *, principal) -> bytes  # authorized read",
+        "async delete(ref) -> None",
+        "async sweep_expired() -> int  # background TTL cleaner (fixes PDFs-never-cleaned)"
+      ],
+      "real_adapter": "adapters/filestore/s3_filestore_adapter.py :: S3FileStoreAdapter \u2014 presigned URLs + lifecycle expiry",
+      "sim_adapter": "adapters/filestore/local_filestore_adapter.py :: LocalFileStoreAdapter \u2014 sandboxed dir with path canonicalization+jail (rejects ../ and absolute paths \u2014 fixes path traversal + /files PHI exposure Criticals), signed-token-only access, REAL background TTL sweeper",
+      "keys": [
+        "AWS_* (for S3 mode)",
+        "BACKSTOP_ARTIFACT_DIR (sim)",
+        "BACKSTOP_ARTIFACT_TTL_S (default 3600)",
+        "BACKSTOP_FILE_SIGN_SECRET"
+      ],
+      "phi": "PDFs may contain redacted-only content; never served unauthenticated; never a raw filesystem path from user input."
+    },
+    {
+      "name": "EventBusPort",
+      "sponsor": "(WS egress)",
+      "file": "orchestrator/backstop/ports/event_bus_port.py",
+      "methods": [
+        "async publish(channel, event: RedactedText-only DTO) -> None  # WS publish accepts ONLY redacted payloads (fixes PHI-over-WS Critical)",
+        "subscribe(channel, principal) -> AsyncIterator[Event]  # per-connection backpressure",
+        "async close() -> None"
+      ],
+      "real_adapter": "adapters/eventbus/ws_event_bus_adapter.py :: WsEventBusAdapter (the production WS fan-out; same impl for sim \u2014 deterministic in-memory)",
+      "sim_adapter": "(same adapter; in-memory queue for tests)",
+      "keys": [
+        "(none)"
+      ],
+      "phi": "structurally PHI-free: publish signature requires RedactedText DTOs only."
+    },
+    {
+      "name": "LetterRenderPort",
+      "sponsor": "(PDF render)",
+      "file": "orchestrator/backstop/ports/letter_render_port.py",
+      "methods": [
+        "render(letter: RedactedAppealLetter) -> bytes  # consumes ONLY RedactedText; escapes all reportlab markup (fixes reportlab markup-injection High)"
+      ],
+      "real_adapter": "adapters/letter/reportlab_letter_adapter.py :: ReportlabLetterAdapter (same impl real+sim; deterministic, local; mandatory escaping of every free-text/PHI field)",
+      "sim_adapter": "(same adapter)",
+      "keys": [
+        "(none)"
+      ],
+      "phi": "input is RedactedText by type; no raw PHI can reach the PDF."
+    },
+    {
+      "name": "SignaturePort",
+      "sponsor": "(cryptographic sign-off)",
+      "file": "orchestrator/backstop/ports/signature_port.py",
+      "methods": [
+        "sign(appeal_hash: bytes, nurse_identity) -> Signature  # genuine Ed25519",
+        "verify(appeal_hash: bytes, sig: Signature) -> bool"
+      ],
+      "real_adapter": "adapters/signoff/ed25519_signature_adapter.py :: Ed25519SignatureAdapter (real cryptography lib; same for sim with a dev keypair \u2014 genuinely cryptographic, not an echo)",
+      "sim_adapter": "(same adapter, dev keypair)",
+      "keys": [
+        "BACKSTOP_SIGNOFF_PRIVATE_KEY / BACKSTOP_SIGNOFF_PUBLIC_KEY"
+      ],
+      "phi": "signs a hash of the redacted letter; no PHI."
+    },
+    {
+      "name": "AuthPort",
+      "sponsor": "(security)",
+      "file": "orchestrator/backstop/ports/auth_port.py",
+      "methods": [
+        "authenticate(token) -> Principal  # raises Unauthenticated (fixes no-auth-on-any-endpoint Critical)",
+        "authorize(principal, action, resource) -> None  # RBAC; raises Forbidden (fixes unredacted GET /appeals, /files ownership)"
+      ],
+      "real_adapter": "adapters/auth/jwt_auth_adapter.py :: JwtAuthAdapter \u2014 JWT/HMAC verification + RBAC (same impl real+sim)",
+      "sim_adapter": "(same adapter, dev signing secret)",
+      "keys": [
+        "BACKSTOP_AUTH_SECRET",
+        "BACKSTOP_AUTH_ISSUER"
+      ],
+      "phi": "Principal carries role/ids only."
+    },
+    {
+      "name": "ClockPort",
+      "sponsor": "(determinism)",
+      "file": "orchestrator/backstop/ports/clock_port.py",
+      "methods": [
+        "now() -> datetime",
+        "monotonic() -> float"
+      ],
+      "real_adapter": "adapters/system/system_clock_adapter.py :: SystemClockAdapter",
+      "sim_adapter": "(tests inject a FakeClock/freezegun)",
+      "keys": [
+        "(none)"
+      ],
+      "phi": "none."
+    },
+    {
+      "name": "IdGenPort",
+      "sponsor": "(determinism)",
+      "file": "orchestrator/backstop/ports/id_gen_port.py",
+      "methods": [
+        "new_id() -> str"
+      ],
+      "real_adapter": "adapters/system/uuid_id_gen_adapter.py :: UuidIdGenAdapter",
+      "sim_adapter": "(tests inject a deterministic counter)",
+      "keys": [
+        "(none)"
+      ],
+      "phi": "none."
+    },
+    {
+      "name": "TaskSupervisorPort",
+      "sponsor": "(lifecycle)",
+      "file": "orchestrator/backstop/ports/task_supervisor_port.py",
+      "methods": [
+        "spawn(coro, *, name) -> Task  # tracked (fixes fire-and-forget)",
+        "async drain(timeout) -> None  # await/cancel all on shutdown (fixes no-graceful-shutdown)",
+        "async cancel_all() -> None"
+      ],
+      "real_adapter": "adapters/system/asyncio_task_supervisor.py :: AsyncioTaskSupervisor",
+      "sim_adapter": "(same adapter; deterministic in tests)",
+      "keys": [
+        "(none)"
+      ],
+      "phi": "none."
+    }
+  ],
+  "modules": [
+    {
+      "path": "orchestrator/backstop/domain/models.py",
+      "responsibility": "Frozen domain entities/value objects (Appeal, Denial, ClaimLine, Payer, EvidenceChunk, Rebuttal, AppealLetter, NurseSignoff, Participant, Channel, Slot, TurnObservation, RoutingDecision, RoutingExplanation, ModelTier enum)",
+      "layer": "domain",
+      "port": "",
+      "deps": []
+    },
+    {
+      "path": "orchestrator/backstop/domain/enums.py",
+      "responsibility": "Domain enums only (AppealStatus state machine, RouteDecision={resubmit,appeal,peer_to_peer,request_records}, ArtifactKind, IntegrationMode, DialogAct)",
+      "layer": "domain",
+      "port": "",
+      "deps": []
+    },
+    {
+      "path": "orchestrator/backstop/domain/redacted.py",
+      "responsibility": "RedactedText NewType + PhiSpan + PhiTag \u2014 the structural type every egress port requires; only RedactionPort produces it",
+      "layer": "domain",
+      "port": "",
+      "deps": []
+    },
+    {
+      "path": "orchestrator/backstop/domain/money.py",
+      "responsibility": "Money + RecoverableDollars + SolDeadline value objects (integer cents, no float) for triage + contingency math",
+      "layer": "domain",
+      "port": "",
+      "deps": []
+    },
+    {
+      "path": "orchestrator/backstop/domain/errors.py",
+      "responsibility": "Domain exception hierarchy (AppealNotFound, SignoffConflict, RedactionRequired, InfeasibleTierError, RetrievalError, GatewayError, SynthError, ChannelNotFound, CapacityTimeout, Unauthenticated, Forbidden, UnsupportedArtifact)",
+      "layer": "domain",
+      "port": "",
+      "deps": []
+    },
+    {
+      "path": "orchestrator/backstop/domain/appeal_aggregate.py",
+      "responsibility": "Appeal state machine + invariant: cannot reach FILED without a valid signature event AND verify_chain()==True. Pure transition methods, no I/O",
+      "layer": "domain",
+      "port": "",
+      "deps": [
+        "domain/models.py",
+        "domain/enums.py",
+        "domain/redacted.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/domain/triage.py",
+      "responsibility": "Pure recoverable-$ x SOL-deadline scoring: Appeal -> TriageScore, deterministic, side-effect-free",
+      "layer": "domain",
+      "port": "",
+      "deps": [
+        "domain/models.py",
+        "domain/money.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/domain/routing_policy.py",
+      "responsibility": "Pure rules mapping denial+claim -> RouteDecision (resubmit vs appeal vs peer-to-peer); no I/O",
+      "layer": "domain",
+      "port": "",
+      "deps": [
+        "domain/models.py",
+        "domain/enums.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/domain/carc_table.py",
+      "responsibility": "CARC/RARC code -> {category, canonical_reason, default_route} lookup (e.g. CO-197 -> Precertification/authorization absent); single-responsibility data map",
+      "layer": "domain",
+      "port": "",
+      "deps": []
+    },
+    {
+      "path": "orchestrator/backstop/ports/routing_port.py",
+      "responsibility": "RoutingPort Protocol + TurnObservation/RoutingDecision/RoutingExplanation DTOs (PAVO)",
+      "layer": "port",
+      "port": "RoutingPort",
+      "deps": [
+        "domain/models.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/ports/retrieval_port.py",
+      "responsibility": "RetrievalPort Protocol + RetrievalQuery/RetrievalResult/EvidenceChunk/RetrievalHealth DTOs (Moss)",
+      "layer": "port",
+      "port": "RetrievalPort",
+      "deps": [
+        "domain/models.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/ports/llm_gateway_port.py",
+      "responsibility": "LLMGatewayPort Protocol + LLMRequest/LLMResponse/LLMChunk/GatewayHealth/CostSnapshot DTOs (TrueFoundry)",
+      "layer": "port",
+      "port": "LLMGatewayPort",
+      "deps": [
+        "domain/redacted.py",
+        "domain/money.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/ports/redaction_port.py",
+      "responsibility": "RedactionPort Protocol + Message DTO (TrueFoundry PHI)",
+      "layer": "port",
+      "port": "RedactionPort",
+      "deps": [
+        "domain/redacted.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/ports/audit_log_port.py",
+      "responsibility": "AuditLogPort Protocol + AuditRecord DTO (TrueFoundry audit, hash-chained)",
+      "layer": "port",
+      "port": "AuditLogPort",
+      "deps": [
+        "domain/redacted.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/ports/cost_ledger_port.py",
+      "responsibility": "CostLedgerPort Protocol + CostSnapshot DTO (TrueFoundry cost)",
+      "layer": "port",
+      "port": "CostLedgerPort",
+      "deps": [
+        "domain/money.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/ports/denial_parser_port.py",
+      "responsibility": "DenialParserPort Protocol + ParseRequest/DenialExtraction/ExtractedField/ArtifactKind DTOs (Unsiloed)",
+      "layer": "port",
+      "port": "DenialParserPort",
+      "deps": [
+        "domain/models.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/ports/reasoning_port.py",
+      "responsibility": "ReasoningPort Protocol + ComposeLineRequest/Result, InterpretDenialRequest, DenialInterpretation, EvidenceSnippet DTOs (MiniMax)",
+      "layer": "port",
+      "port": "ReasoningPort",
+      "deps": [
+        "domain/models.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/ports/speech_synthesis_port.py",
+      "responsibility": "SpeechSynthesisPort Protocol + SynthRequest/SynthResult/AudioFrame/Language DTOs (Qwen)",
+      "layer": "port",
+      "port": "SpeechSynthesisPort",
+      "deps": [
+        "domain/redacted.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/ports/voice_transport_port.py",
+      "responsibility": "VoiceTransportPort Protocol + Channel/JoinToken/Participant/Claims DTOs (LiveKit)",
+      "layer": "port",
+      "port": "VoiceTransportPort",
+      "deps": [
+        "domain/models.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/ports/concurrency_gate_port.py",
+      "responsibility": "ConcurrencyGatePort Protocol + Slot/CapacitySnapshot DTOs (AWS)",
+      "layer": "port",
+      "port": "ConcurrencyGatePort",
+      "deps": []
+    },
+    {
+      "path": "orchestrator/backstop/ports/ivr_port.py",
+      "responsibility": "IvrPort Protocol + IvrSession/IvrState DTOs",
+      "layer": "port",
+      "port": "IvrPort",
+      "deps": [
+        "domain/models.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/ports/appeal_repository_port.py",
+      "responsibility": "AppealRepositoryPort Protocol (bounded CRUD + atomic CAS + append-only events; replaces global APPEALS dict)",
+      "layer": "port",
+      "port": "AppealRepositoryPort",
+      "deps": [
+        "domain/appeal_aggregate.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/ports/file_store_port.py",
+      "responsibility": "FileStorePort Protocol + ArtifactRef DTO (signed-URL-only, TTL)",
+      "layer": "port",
+      "port": "FileStorePort",
+      "deps": [
+        "domain/redacted.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/ports/event_bus_port.py",
+      "responsibility": "EventBusPort Protocol (RedactedText-only publish)",
+      "layer": "port",
+      "port": "EventBusPort",
+      "deps": [
+        "domain/redacted.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/ports/letter_render_port.py",
+      "responsibility": "LetterRenderPort Protocol + RedactedAppealLetter DTO",
+      "layer": "port",
+      "port": "LetterRenderPort",
+      "deps": [
+        "domain/redacted.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/ports/signature_port.py",
+      "responsibility": "SignaturePort Protocol + Signature DTO (Ed25519)",
+      "layer": "port",
+      "port": "SignaturePort",
+      "deps": [
+        "domain/appeal_aggregate.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/ports/auth_port.py",
+      "responsibility": "AuthPort Protocol + Principal DTO",
+      "layer": "port",
+      "port": "AuthPort",
+      "deps": [
+        "domain/models.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/ports/clock_port.py",
+      "responsibility": "ClockPort Protocol",
+      "layer": "port",
+      "port": "ClockPort",
+      "deps": []
+    },
+    {
+      "path": "orchestrator/backstop/ports/id_gen_port.py",
+      "responsibility": "IdGenPort Protocol",
+      "layer": "port",
+      "port": "IdGenPort",
+      "deps": []
+    },
+    {
+      "path": "orchestrator/backstop/ports/task_supervisor_port.py",
+      "responsibility": "TaskSupervisorPort Protocol",
+      "layer": "port",
+      "port": "TaskSupervisorPort",
+      "deps": []
+    },
+    {
+      "path": "orchestrator/backstop/adapters/pavo/_coupling.py",
+      "responsibility": "Shared vendored turn_to_state_vector copy + 48->3 collapse + infeasible_for_turn, imported by BOTH pavo adapters (one responsibility, no duplication)",
+      "layer": "adapter",
+      "port": "RoutingPort",
+      "deps": []
+    },
+    {
+      "path": "orchestrator/backstop/adapters/pavo/torch_routing_adapter.py",
+      "responsibility": "TorchPavoRoutingAdapter (real): wraps pavo_bench.load_pretrained + PretrainedPAVORouter; fail-fast guard on n_params_loaded==85041 and model.n_profiles==48 (NOT info[architecture] which is None for the default raw-state_dict checkpoint)",
+      "layer": "adapter",
+      "port": "RoutingPort",
+      "deps": [
+        "ports/routing_port.py",
+        "adapters/pavo/_coupling.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/pavo/numpy_routing_adapter.py",
+      "responsibility": "NumpyPavoRoutingAdapter (sim/fallback): pure-numpy bit-faithful MLP forward over the SAME weights (loads .pt or a meta_controller_weights.npz export); zero torch dep",
+      "layer": "adapter",
+      "port": "RoutingPort",
+      "deps": [
+        "ports/routing_port.py",
+        "adapters/pavo/_coupling.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/moss/moss_http_adapter.py",
+      "responsibility": "MossHttpAdapter (real): POST /v1/query project-scoped; one private _auth_headers(); injected httpx client",
+      "layer": "adapter",
+      "port": "RetrievalPort",
+      "deps": [
+        "ports/retrieval_port.py",
+        "infra/http_client.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/moss/tfidf_retrieval_adapter.py",
+      "responsibility": "LocalTfidfRetrievalAdapter (sim): REAL TF-IDF + cosine over injected RunbookCorpus",
+      "layer": "adapter",
+      "port": "RetrievalPort",
+      "deps": [
+        "ports/retrieval_port.py",
+        "adapters/text/runbook_corpus.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/text/runbook_corpus.py",
+      "responsibility": "Shared stdlib TF-IDF index + cosine util over data/runbooks/*.md (no hard sklearn dep; sklearn optional accelerator). Used by Moss sim AND MiniMax sim \u2014 single responsibility, no duplication",
+      "layer": "adapter",
+      "port": "",
+      "deps": []
+    },
+    {
+      "path": "orchestrator/backstop/adapters/truefoundry/tf_gateway_adapter.py",
+      "responsibility": "TrueFoundryGatewayAdapter (real): OpenAI-compatible gateway; injected Redaction/Audit/CostLedger ports",
+      "layer": "adapter",
+      "port": "LLMGatewayPort",
+      "deps": [
+        "ports/llm_gateway_port.py",
+        "infra/http_client.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/truefoundry/sim_gateway_adapter.py",
+      "responsibility": "SimGatewayAdapter (sim): real redaction/audit/cost, local deterministic completion engine",
+      "layer": "adapter",
+      "port": "LLMGatewayPort",
+      "deps": [
+        "ports/llm_gateway_port.py",
+        "adapters/text/runbook_corpus.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/truefoundry/local_redaction_adapter.py",
+      "responsibility": "LocalRedactionAdapter: REAL presidio-style regex+context PHI scrubbing -> RedactedText (sole producer)",
+      "layer": "adapter",
+      "port": "RedactionPort",
+      "deps": [
+        "ports/redaction_port.py",
+        "domain/redacted.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/truefoundry/tf_redaction_adapter.py",
+      "responsibility": "TrueFoundryRedactionAdapter (real mode wrapper; falls back to local ruleset)",
+      "layer": "adapter",
+      "port": "RedactionPort",
+      "deps": [
+        "ports/redaction_port.py",
+        "adapters/truefoundry/local_redaction_adapter.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/truefoundry/hashchain_audit_adapter.py",
+      "responsibility": "HashChainAuditAdapter: tamper-evident append-only audit chain (SQLite real / JSONL sim)",
+      "layer": "adapter",
+      "port": "AuditLogPort",
+      "deps": [
+        "ports/audit_log_port.py",
+        "infra/db.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/truefoundry/cost_ledger_adapter.py",
+      "responsibility": "CostLedgerAdapter: priced token/char usage ledger; shared price table real+sim",
+      "layer": "adapter",
+      "port": "CostLedgerPort",
+      "deps": [
+        "ports/cost_ledger_port.py",
+        "infra/db.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/unsiloed/unsiloed_http_adapter.py",
+      "responsibility": "UnsiloedDenialParserAdapter (real): async extract job + poll; bytes-only (no path); refuses EDI",
+      "layer": "adapter",
+      "port": "DenialParserPort",
+      "deps": [
+        "ports/denial_parser_port.py",
+        "infra/http_client.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/unsiloed/deterministic_parser_adapter.py",
+      "responsibility": "DeterministicDenialParserAdapter (sim): REAL X12 (835/837/277) + EOB/CMS-1500/UB-04 regex parser + carc_table lookup",
+      "layer": "adapter",
+      "port": "DenialParserPort",
+      "deps": [
+        "ports/denial_parser_port.py",
+        "domain/carc_table.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/minimax/minimax_adapter.py",
+      "responsibility": "MiniMaxReasoningAdapter (real): native chatcompletion_v2 + base_resp.status_code check + OpenAI-compat fallback; injected PromptBuilder",
+      "layer": "adapter",
+      "port": "ReasoningPort",
+      "deps": [
+        "ports/reasoning_port.py",
+        "infra/http_client.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/minimax/local_reasoning_adapter.py",
+      "responsibility": "MiniMaxSimReasoningAdapter (sim): REAL grounded-NLG slot-filling + carc_rarc.json classifier; shares runbook_corpus TF-IDF",
+      "layer": "adapter",
+      "port": "ReasoningPort",
+      "deps": [
+        "ports/reasoning_port.py",
+        "adapters/text/runbook_corpus.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/qwen/qwen_tts_adapter.py",
+      "responsibility": "QwenTtsAdapter (real): DashScope HTTP + WSS; fetch+validate WAV via stdlib wave; typed SynthError",
+      "layer": "adapter",
+      "port": "SpeechSynthesisPort",
+      "deps": [
+        "ports/speech_synthesis_port.py",
+        "infra/http_client.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/qwen/sim_tts_adapter.py",
+      "responsibility": "SimTtsAdapter (sim): REAL stdlib DSP -> deterministic playable WAV whose duration scales with text",
+      "layer": "adapter",
+      "port": "SpeechSynthesisPort",
+      "deps": [
+        "ports/speech_synthesis_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/livekit/livekit_adapter.py",
+      "responsibility": "LiveKitVoiceTransportAdapter (real): livekit-api SDK; HS256 token mint; Twirp RoomService; vendor->domain error mapping",
+      "layer": "adapter",
+      "port": "VoiceTransportPort",
+      "deps": [
+        "ports/voice_transport_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/livekit/inprocess_transport_adapter.py",
+      "responsibility": "InProcessVoiceTransportAdapter (sim): REAL asyncio pub/sub frame fabric + REAL PyJWT HS256 tokens (byte-compatible claims)",
+      "layer": "adapter",
+      "port": "VoiceTransportPort",
+      "deps": [
+        "ports/voice_transport_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/aws/fargate_gate.py",
+      "responsibility": "FargateConcurrencyGate (real): warm-pool + RunTask/StopTask admission; lock never held across AWS await",
+      "layer": "adapter",
+      "port": "ConcurrencyGatePort",
+      "deps": [
+        "ports/concurrency_gate_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/aws/semaphore_gate.py",
+      "responsibility": "SemaphoreConcurrencyGate (sim/fallback): REAL asyncio.Semaphore backpressure; same Slot/CapacityTimeout contract",
+      "layer": "adapter",
+      "port": "ConcurrencyGatePort",
+      "deps": [
+        "ports/concurrency_gate_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/ivr/ivr_sim_adapter.py",
+      "responsibility": "IvrSimAdapter (sim-only): deterministic IVR state machine (DTMF/holds/transfers)",
+      "layer": "adapter",
+      "port": "IvrPort",
+      "deps": [
+        "ports/ivr_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/persistence/sqlite_appeal_repo.py",
+      "responsibility": "SqliteAppealRepo (real): WAL, atomic CAS updates, row caps",
+      "layer": "adapter",
+      "port": "AppealRepositoryPort",
+      "deps": [
+        "ports/appeal_repository_port.py",
+        "infra/db.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/persistence/memory_appeal_repo.py",
+      "responsibility": "MemoryAppealRepo (sim): bounded LRU+TTL eviction (fixes OOM)",
+      "layer": "adapter",
+      "port": "AppealRepositoryPort",
+      "deps": [
+        "ports/appeal_repository_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/filestore/local_filestore_adapter.py",
+      "responsibility": "LocalFileStoreAdapter: path-jail + signed-token access + TTL sweeper (fixes traversal, /files exposure, PDF cleanup)",
+      "layer": "adapter",
+      "port": "FileStorePort",
+      "deps": [
+        "ports/file_store_port.py",
+        "ports/clock_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/filestore/s3_filestore_adapter.py",
+      "responsibility": "S3FileStoreAdapter (real): presigned URLs + lifecycle expiry",
+      "layer": "adapter",
+      "port": "FileStorePort",
+      "deps": [
+        "ports/file_store_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/eventbus/ws_event_bus_adapter.py",
+      "responsibility": "WsEventBusAdapter: RedactedText-only WS fan-out + per-connection backpressure",
+      "layer": "adapter",
+      "port": "EventBusPort",
+      "deps": [
+        "ports/event_bus_port.py",
+        "domain/redacted.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/letter/reportlab_letter_adapter.py",
+      "responsibility": "ReportlabLetterAdapter: markup-escaping PDF render consuming RedactedText only",
+      "layer": "adapter",
+      "port": "LetterRenderPort",
+      "deps": [
+        "ports/letter_render_port.py",
+        "domain/redacted.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/signoff/ed25519_signature_adapter.py",
+      "responsibility": "Ed25519SignatureAdapter: genuine sign/verify",
+      "layer": "adapter",
+      "port": "SignaturePort",
+      "deps": [
+        "ports/signature_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/auth/jwt_auth_adapter.py",
+      "responsibility": "JwtAuthAdapter: JWT verify + RBAC (fixes no-auth, unredacted GET /appeals, /files ownership)",
+      "layer": "adapter",
+      "port": "AuthPort",
+      "deps": [
+        "ports/auth_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/system/system_clock_adapter.py",
+      "responsibility": "SystemClockAdapter: real UTC now()/monotonic()",
+      "layer": "adapter",
+      "port": "ClockPort",
+      "deps": [
+        "ports/clock_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/system/uuid_id_gen_adapter.py",
+      "responsibility": "UuidIdGenAdapter: uuid4",
+      "layer": "adapter",
+      "port": "IdGenPort",
+      "deps": [
+        "ports/id_gen_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/adapters/system/asyncio_task_supervisor.py",
+      "responsibility": "AsyncioTaskSupervisor: tracked spawn + drain/cancel (fixes fire-and-forget + graceful shutdown)",
+      "layer": "adapter",
+      "port": "TaskSupervisorPort",
+      "deps": [
+        "ports/task_supervisor_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/services/call_service.py",
+      "responsibility": "Per-turn PAVO loop use-case: route via RoutingPort -> (on denial turn) retrieve via RetrievalPort -> redact via RedactionPort -> reason via ReasoningPort -> synth via SpeechSynthesisPort -> publish over VoiceTransportPort; records RoutingExplanation to timeline; rejects infeasible manual tier overrides",
+      "layer": "service",
+      "port": "",
+      "deps": [
+        "ports/routing_port.py",
+        "ports/retrieval_port.py",
+        "ports/redaction_port.py",
+        "ports/reasoning_port.py",
+        "ports/speech_synthesis_port.py",
+        "ports/voice_transport_port.py",
+        "ports/ivr_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/services/swarm_service.py",
+      "responsibility": "Concurrent orchestrator: fan out CallService under 'async with gate.slot(appeal_id)' (ConcurrencyGatePort), open/close one channel per call, lock-free per-appeal isolation; tracked tasks via TaskSupervisorPort",
+      "layer": "service",
+      "port": "",
+      "deps": [
+        "services/call_service.py",
+        "ports/concurrency_gate_port.py",
+        "ports/voice_transport_port.py",
+        "ports/task_supervisor_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/services/reconcile_service.py",
+      "responsibility": "Find the contradiction overturning the denial from EOB(Unsiloed) vs runbook(Moss) via LLMGatewayPort.complete(stage=synthesize_rebuttal); returns Rebuttal with provenance",
+      "layer": "service",
+      "port": "",
+      "deps": [
+        "ports/llm_gateway_port.py",
+        "ports/retrieval_port.py",
+        "domain/models.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/services/ingest_denial_service.py",
+      "responsibility": "STAGE-0 ingestion use-case: supports()-route to DenialParserPort, fall back to deterministic on UnsupportedArtifact, wrap in ConcurrencyGate + audit boundary, persist DenialExtraction; caps/validates upload (fixes unbounded uploads)",
+      "layer": "service",
+      "port": "",
+      "deps": [
+        "ports/denial_parser_port.py",
+        "ports/concurrency_gate_port.py",
+        "ports/audit_log_port.py",
+        "ports/appeal_repository_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/services/ingestion_batch_service.py",
+      "responsibility": "Batch backlog use-case (835/837/277 + EOB-image): split EDI, dedupe, create Appeals, enqueue triage; throttles by gate.capacity().available",
+      "layer": "service",
+      "port": "",
+      "deps": [
+        "services/ingest_denial_service.py",
+        "services/triage_service.py",
+        "ports/concurrency_gate_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/services/triage_service.py",
+      "responsibility": "Build recoverable-$ x SOL worklist via domain.triage + route via domain.routing_policy; reads cost via LLMGatewayPort.cost_to_date",
+      "layer": "service",
+      "port": "",
+      "deps": [
+        "domain/triage.py",
+        "domain/routing_policy.py",
+        "ports/appeal_repository_port.py",
+        "ports/llm_gateway_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/services/appeal_service.py",
+      "responsibility": "Top-level appeal lifecycle: create from Denial -> swarm -> reconcile -> persist + emit timeline/events; drives the Appeal aggregate state machine",
+      "layer": "service",
+      "port": "",
+      "deps": [
+        "services/swarm_service.py",
+        "services/reconcile_service.py",
+        "ports/appeal_repository_port.py",
+        "ports/event_bus_port.py",
+        "ports/clock_port.py",
+        "ports/id_gen_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/services/letter_service.py",
+      "responsibility": "Compose appeal letter -> redact via RedactionPort BEFORE render -> render via LetterRenderPort -> store via FileStorePort (enforces redact-then-emit)",
+      "layer": "service",
+      "port": "",
+      "deps": [
+        "ports/redaction_port.py",
+        "ports/letter_render_port.py",
+        "ports/file_store_port.py",
+        "ports/llm_gateway_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/services/review_service.py",
+      "responsibility": "Nurse review-queue use-case: enqueue/claim/list, expose redacted evidence timeline, accept/reject",
+      "layer": "service",
+      "port": "",
+      "deps": [
+        "ports/appeal_repository_port.py",
+        "ports/redaction_port.py",
+        "ports/audit_log_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/services/signoff_service.py",
+      "responsibility": "Cryptographic sign-off gate: verify_chain() must be True -> SignaturePort.sign(letter hash, nurse) -> update_status_atomic to FILED; mandatory human sign-off (honesty contract)",
+      "layer": "service",
+      "port": "",
+      "deps": [
+        "ports/signature_port.py",
+        "ports/audit_log_port.py",
+        "ports/appeal_repository_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/services/nurse_bridge_service.py",
+      "responsibility": "Barge-in use-case: VoiceTransportPort.bridge_nurse short-TTL token for live takeover",
+      "layer": "service",
+      "port": "",
+      "deps": [
+        "ports/voice_transport_port.py",
+        "ports/auth_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/services/auth_service.py",
+      "responsibility": "Authn/authz use-case wrapping AuthPort for controllers",
+      "layer": "service",
+      "port": "",
+      "deps": [
+        "ports/auth_port.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/controllers/dependencies.py",
+      "responsibility": "FastAPI DI providers: get_container(request) reads app.state; get_principal enforces AuthPort; constructs nothing",
+      "layer": "controller",
+      "port": "",
+      "deps": [
+        "composition/container.py",
+        "services/auth_service.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/controllers/schemas.py",
+      "responsibility": "Pydantic request/response DTOs with validation; redacted-only response models",
+      "layer": "controller",
+      "port": "",
+      "deps": [
+        "domain/models.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/controllers/appeals_controller.py",
+      "responsibility": "HTTP routes for appeals (create/get/list); authz-gated; redacted DTOs only (fixes unredacted GET /appeals/{id})",
+      "layer": "controller",
+      "port": "",
+      "deps": [
+        "services/appeal_service.py",
+        "controllers/dependencies.py",
+        "controllers/schemas.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/controllers/ingestion_controller.py",
+      "responsibility": "HTTP batch upload/ingest with size caps + content-type validation (fixes unbounded uploads)",
+      "layer": "controller",
+      "port": "",
+      "deps": [
+        "services/ingestion_batch_service.py",
+        "controllers/dependencies.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/controllers/review_controller.py",
+      "responsibility": "HTTP routes for nurse queue + evidence timeline + sign-off submission + barge-in; authz-gated",
+      "layer": "controller",
+      "port": "",
+      "deps": [
+        "services/review_service.py",
+        "services/signoff_service.py",
+        "services/nurse_bridge_service.py",
+        "controllers/dependencies.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/controllers/triage_controller.py",
+      "responsibility": "HTTP routes for the triage worklist (recoverable-$ x SOL + route decision)",
+      "layer": "controller",
+      "port": "",
+      "deps": [
+        "services/triage_service.py",
+        "controllers/dependencies.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/controllers/files_controller.py",
+      "responsibility": "PDF served ONLY via short-lived signed URLs + per-appeal ownership authz (fixes unauthenticated /files PHI)",
+      "layer": "controller",
+      "port": "",
+      "deps": [
+        "ports/file_store_port.py",
+        "controllers/dependencies.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/controllers/ws_controller.py",
+      "responsibility": "WebSocket: origin check + token auth handshake (verify_token), subscribes to EventBusPort (redacted only) (fixes no-WS-origin-check + PHI-over-WS)",
+      "layer": "controller",
+      "port": "",
+      "deps": [
+        "ports/event_bus_port.py",
+        "services/auth_service.py",
+        "controllers/dependencies.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/infra/config.py",
+      "responsibility": "The ONLY reader of os.environ: frozen pydantic-settings Settings (all sponsor keys, per-integration modes, auth secrets, CORS allowlist, upload caps, TTLs, price table path); fails fast on invalid config",
+      "layer": "infra",
+      "port": "",
+      "deps": []
+    },
+    {
+      "path": "orchestrator/backstop/infra/http_client.py",
+      "responsibility": "Shared async httpx client factory (timeouts/retries/TLS) injected into real adapters; closed on shutdown",
+      "layer": "infra",
+      "port": "",
+      "deps": []
+    },
+    {
+      "path": "orchestrator/backstop/infra/db.py",
+      "responsibility": "Async SQLite engine/session factory for SQL adapters; lifecycle-managed",
+      "layer": "infra",
+      "port": "",
+      "deps": [
+        "infra/config.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/infra/logging.py",
+      "responsibility": "Structured JSON logging with a PHI-scrubbing filter (fixes no-structured-logging + defense-in-depth)",
+      "layer": "infra",
+      "port": "",
+      "deps": []
+    },
+    {
+      "path": "orchestrator/backstop/infra/security_headers.py",
+      "responsibility": "CORS allowlist + CSP/security-header middleware (fixes wildcard CORS); reads allowlist from Settings",
+      "layer": "infra",
+      "port": "",
+      "deps": [
+        "infra/config.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/composition/adapter_factory.py",
+      "responsibility": "Per-port make_<port>(settings, shared) factories selecting real-vs-sim by mode; PAVO factory tries torch then falls back to numpy (never a real/sim quality branch)",
+      "layer": "composition",
+      "port": "",
+      "deps": [
+        "infra/config.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/composition/container.py",
+      "responsibility": "Immutable Container dataclass holding all constructed ports + services; no logic",
+      "layer": "composition",
+      "port": "",
+      "deps": []
+    },
+    {
+      "path": "orchestrator/backstop/composition/wiring.py",
+      "responsibility": "build_container(settings): construct shared singletons (RedactionPort/AuditPort/CostLedger/Clock/IdGen), build adapters by mode, assemble services, return Container",
+      "layer": "composition",
+      "port": "",
+      "deps": [
+        "composition/adapter_factory.py",
+        "composition/container.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/app.py",
+      "responsibility": "Entrypoint: build container once, FastAPI lifespan (startup reconcile() + shutdown graceful drain/aclose), mount middleware + controllers (fixes no-graceful-shutdown)",
+      "layer": "composition",
+      "port": "",
+      "deps": [
+        "composition/wiring.py",
+        "infra/security_headers.py",
+        "infra/logging.py",
+        "controllers/appeals_controller.py"
+      ]
+    },
+    {
+      "path": "orchestrator/backstop/web/",
+      "responsibility": "Dashboard: per-component output encoding (fixes DOM XSS); consumes redacted server-pushed WS events (replaces snapshot-watchdog race)",
+      "layer": "controller",
+      "port": "",
+      "deps": [
+        "controllers/ws_controller.py"
+      ]
+    },
+    {
+      "path": "data/runbooks/*.md",
+      "responsibility": "SEED DELIVERABLE (does not exist yet): appeal-runbook/policy/precedent corpus with front-matter (source, doc_type, payer, carc) backing BOTH Moss sim TF-IDF and the real Moss index (same source-of-truth)",
+      "layer": "data",
+      "port": "",
+      "deps": []
+    },
+    {
+      "path": "data/carc_rarc.json",
+      "responsibility": "SEED DELIVERABLE: CARC/RARC lexicon (code -> category, canonical_reason, default_route, rebuttal_template) for the Unsiloed sim + MiniMax sim",
+      "layer": "data",
+      "port": "",
+      "deps": []
+    },
+    {
+      "path": "tests/arch/test_layering.py",
+      "responsibility": "Architecture guard: static AST check that only config.py reads os.environ, only real adapters import vendor SDKs/torch/httpx, services import no vendor SDK, egress ports accept only RedactedText",
+      "layer": "test",
+      "port": "",
+      "deps": []
+    }
+  ],
+  "sponsor_map": [
+    {
+      "sponsor": "PAVO",
+      "port": "RoutingPort",
+      "real_adapter": "TorchPavoRoutingAdapter (adapters/pavo/torch_routing_adapter.py)",
+      "sim_adapter": "NumpyPavoRoutingAdapter (adapters/pavo/numpy_routing_adapter.py) \u2014 bit-faithful, IS the policy",
+      "keys": [
+        "NONE (no API key, no network)",
+        "PAVO_WEIGHTS_PATH?",
+        "PAVO_BENCH_ROOT?",
+        "PAVO_DEVICE? (cpu)",
+        "PAVO_ADAPTER_IMPL? (torch|numpy)"
+      ],
+      "load_bearing": "Per-turn gate on the call loop: route() selects which downstream sponsor tier runs (CLOUD_PREMIUM->TrueFoundry/MiniMax premium+Qwen full; HYBRID->premium ASR+cheap LLM; ONDEVICE_FAST->edge). cost.py attributes per-turn cost by tier. Frozen policy, always real (torch or numpy)."
+    },
+    {
+      "sponsor": "Moss",
+      "port": "RetrievalPort",
+      "real_adapter": "MossHttpAdapter (adapters/moss/moss_http_adapter.py)",
+      "sim_adapter": "LocalTfidfRetrievalAdapter (adapters/moss/tfidf_retrieval_adapter.py)",
+      "keys": [
+        "MOSS_PROJECT_ID",
+        "MOSS_PROJECT_KEY",
+        "MOSS_BASE_URL? (api.usemoss.dev)",
+        "MOSS_TIMEOUT_S? (2.0)"
+      ],
+      "load_bearing": "On the denial-reason turn, retrieves the winning rebuttal + precedent chunks (with provenance) that MiniMax composes into the spoken line and letter.py cites verbatim. Real and sim index the SAME data/runbooks/ source-of-truth."
+    },
+    {
+      "sponsor": "TrueFoundry",
+      "port": "LLMGatewayPort (+ RedactionPort + AuditLogPort + CostLedgerPort, all TrueFoundry sub-capabilities in their own files)",
+      "real_adapter": "TrueFoundryGatewayAdapter (adapters/truefoundry/tf_gateway_adapter.py); TrueFoundryRedactionAdapter; HashChainAuditAdapter; CostLedgerAdapter",
+      "sim_adapter": "SimGatewayAdapter (real redaction/audit/cost, local completion); LocalRedactionAdapter; same audit/cost adapters in-memory",
+      "keys": [
+        "TRUEFOUNDRY_API_KEY",
+        "TRUEFOUNDRY_BASE_URL",
+        "TRUEFOUNDRY_DEFAULT_MODEL",
+        "TFY_MODE (real|sim)",
+        "TFY_TENANT?"
+      ],
+      "load_bearing": "THE single chokepoint for EVERY LLM byte: redact-out -> upstream -> redact-in -> hash-chained audit -> priced cost. Remove it = no model access, no PHI redaction, no audit, no cost. Sign-off gate requires verify_chain()==True."
+    },
+    {
+      "sponsor": "Unsiloed",
+      "port": "DenialParserPort",
+      "real_adapter": "UnsiloedDenialParserAdapter (adapters/unsiloed/unsiloed_http_adapter.py)",
+      "sim_adapter": "DeterministicDenialParserAdapter (adapters/unsiloed/deterministic_parser_adapter.py)",
+      "keys": [
+        "UNSILOED_API_KEY",
+        "UNSILOED_BASE_URL? (prod.visionapi.unsiloed.ai)",
+        "UNSILOED_MODE (real|sim)",
+        "UNSILOED_CONFIDENCE_FLOOR? (0.85)"
+      ],
+      "load_bearing": "STAGE-0: turns EOB/CMS-1500/UB-04 images (real) and 835/837/277 EDI (deterministic, always sim \u2014 Unsiloed is image-only) into the structured Denial that seeds the whole pipeline. needs_human_review gate feeds the nurse queue."
+    },
+    {
+      "sponsor": "MiniMax",
+      "port": "ReasoningPort",
+      "real_adapter": "MiniMaxReasoningAdapter (adapters/minimax/minimax_adapter.py)",
+      "sim_adapter": "MiniMaxSimReasoningAdapter (adapters/minimax/local_reasoning_adapter.py)",
+      "keys": [
+        "MINIMAX_API_KEY",
+        "MINIMAX_GROUP_ID",
+        "MINIMAX_BASE_URL?",
+        "MINIMAX_MODEL?",
+        "MINIMAX_MODE (real|sim)",
+        "MINIMAX_ROUTE? (native|openai)"
+      ],
+      "load_bearing": "When PAVO routes to hybrid/cloud: composes the ONE grounded spoken line (cited to Moss evidence) and interprets ambiguous denial text into category/CARC-RARC/rebuttal-hook/route. Brain between retrieval and speech. Reached only via TrueFoundry redaction boundary."
+    },
+    {
+      "sponsor": "Qwen/DashScope",
+      "port": "SpeechSynthesisPort",
+      "real_adapter": "QwenTtsAdapter (adapters/qwen/qwen_tts_adapter.py)",
+      "sim_adapter": "SimTtsAdapter (adapters/qwen/sim_tts_adapter.py)",
+      "keys": [
+        "QWEN_API_KEY (alias)",
+        "DASHSCOPE_API_KEY (canonical)",
+        "QWEN_REGION? (intl)",
+        "QWEN_TTS_MODEL?",
+        "QWEN_VOICE_ID?",
+        "QWEN_MODE (real|sim)"
+      ],
+      "load_bearing": "Synthesizes MiniMax's composed line into brand-voice WAV pushed over LiveKit; sim produces a genuine length-correct playable WAV. PHI precondition: text must be RedactedText (no BAA)."
+    },
+    {
+      "sponsor": "LiveKit",
+      "port": "VoiceTransportPort",
+      "real_adapter": "LiveKitVoiceTransportAdapter (adapters/livekit/livekit_adapter.py)",
+      "sim_adapter": "InProcessVoiceTransportAdapter (adapters/livekit/inprocess_transport_adapter.py)",
+      "keys": [
+        "LIVEKIT_URL",
+        "LIVEKIT_API_KEY",
+        "LIVEKIT_API_SECRET",
+        "LIVEKIT_MODE (real|sim)",
+        "LIVEKIT_SIM_SECRET?"
+      ],
+      "load_bearing": "Per-call room transport + short-TTL scoped tokens; bridge_nurse() is the load-bearing human barge-in/takeover before sign-off; verify_token() authorizes the WS/voice edge. Sim is a REAL in-process transport with REAL HS256 crypto."
+    },
+    {
+      "sponsor": "AWS",
+      "port": "ConcurrencyGatePort",
+      "real_adapter": "FargateConcurrencyGate (adapters/aws/fargate_gate.py)",
+      "sim_adapter": "SemaphoreConcurrencyGate (adapters/aws/semaphore_gate.py)",
+      "keys": [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_REGION",
+        "AWS_SESSION_TOKEN?",
+        "BACKSTOP_ECS_CLUSTER",
+        "BACKSTOP_ECS_TASK_DEFINITION",
+        "BACKSTOP_ECS_SUBNETS",
+        "BACKSTOP_ECS_SECURITY_GROUPS",
+        "BACKSTOP_ECS_CONTAINER_NAME",
+        "BACKSTOP_MAX_CONCURRENCY? (200)",
+        "BACKSTOP_ECS_CAPACITY_PROVIDER? (FARGATE)",
+        "BACKSTOP_MODE (real|sim)"
+      ],
+      "load_bearing": "Admission control: SwarmService acquires a slot per appeal via 'async with gate.slot(appeal_id)' BEFORE the PAVO loop starts. Caps global concurrency (fixes no-cap + threadpool-starvation + OOM-fanout). Never sees PHI."
+    }
+  ],
+  "persistence": {
+    "decision": "Replace the in-memory global APPEALS dict with SQLite (WAL mode) behind AppealRepositoryPort + AuditLogPort + CostLedgerPort. Sim/test uses bounded-LRU+TTL in-memory adapters that honor the SAME contract (atomic CAS, append-only). SQLite is the production default (single-node, file-backed, sufficient for a hackathon RCM tool; DATABASE_URL allows Postgres later without touching services).",
+    "engine": "aiosqlite / sqlite3 WAL via infra/db.py; one writer connection, atomic transactions; row caps + TTL eviction job for ephemeral state.",
+    "schema": {
+      "appeals": "id TEXT PRIMARY KEY, status TEXT NOT NULL (DENIED|TRIAGED|IN_APPEAL|AWAITING_SIGNOFF|FILED|ABANDONED), payer_id TEXT, member_id_hash TEXT (salted hash, never raw), claim_number_hash TEXT, denial_json TEXT (redacted DenialExtraction), recoverable_cents INTEGER, sol_deadline TEXT (ISO), route_decision TEXT, needs_human_review INTEGER, created_at TEXT, updated_at TEXT, version INTEGER (optimistic-lock for update_status_atomic CAS). INDEX(status), INDEX(sol_deadline), INDEX(needs_human_review).",
+      "events": "id INTEGER PRIMARY KEY AUTOINCREMENT, appeal_id TEXT NOT NULL REFERENCES appeals(id), seq INTEGER NOT NULL, ts TEXT NOT NULL, kind TEXT (denial_parsed|turn_routed|evidence_retrieved|line_composed|contradiction_found|letter_drafted|nurse_claimed|signed|filed), payload_json TEXT (RedactedText only), provenance_json TEXT. UNIQUE(appeal_id, seq). Append-only \u2014 the per-appeal evidence timeline.",
+      "audit": "id INTEGER PRIMARY KEY AUTOINCREMENT, appeal_id TEXT, stage TEXT, model TEXT, mode TEXT (real|sim), ts TEXT, prompt_sha256 TEXT, completion_sha256 TEXT, redaction_count INTEGER, prompt_tokens INTEGER, completion_tokens INTEGER, usd_micros INTEGER, gateway_request_id TEXT, prev_hash TEXT NOT NULL, record_hash TEXT NOT NULL. prev_hash = record_hash of the prior row (hash-chained, tamper-evident); verify_chain() walks and recomputes. Append-only, no UPDATE/DELETE.",
+      "cost_ledger": "id INTEGER PRIMARY KEY AUTOINCREMENT, appeal_id TEXT, stage TEXT, vendor TEXT (truefoundry|qwen), model TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, chars INTEGER, usd_micros INTEGER, ts TEXT. INDEX(appeal_id). Aggregated by snapshot()/cost_to_date(); usd stored as integer micros (no float).",
+      "signoffs": "appeal_id TEXT PRIMARY KEY REFERENCES appeals(id), nurse_id TEXT, letter_sha256 TEXT, signature_b64 TEXT (Ed25519), public_key_id TEXT, audit_chain_head TEXT (record_hash at sign time), signed_at TEXT. One row per filed appeal; insert is gated on verify_chain()==True.",
+      "review_queue": "appeal_id TEXT PRIMARY KEY REFERENCES appeals(id), priority INTEGER, claimed_by TEXT NULL, claimed_at TEXT NULL, enqueued_at TEXT. Priority = triage score; claim is an atomic CAS on claimed_by.",
+      "artifacts": "ref TEXT PRIMARY KEY, appeal_id TEXT, scope TEXT, sha256 TEXT, ttl_expires_at TEXT, created_at TEXT. Backs FileStorePort; the TTL sweeper deletes expired rows + bytes (fixes PDFs-never-cleaned)."
+    },
+    "integrity_rules": [
+      "All money is INTEGER micros/cents \u2014 never float (matches domain.money).",
+      "PHI columns store salted hashes only; raw PHI lives only in redacted_at_rest artifact bytes behind FileStorePort scope tokens.",
+      "audit + events + signoffs are append-only (no UPDATE/DELETE grants in the adapter).",
+      "Status transitions go through update_status_atomic (optimistic version CAS) \u2014 fixes the snapshot-watchdog race.",
+      "FILED requires (signoffs row inserted) AND (verify_chain()==True) AND (status CAS from AWAITING_SIGNOFF) in one transaction."
+    ],
+    "bounded_memory": "MemoryAppealRepo (sim/fallback) is a bounded LRU with capacity + TTL eviction so it cannot OOM; SqliteAppealRepo has row caps + an eviction job for terminal appeals past retention."
+  },
+  "security_model": {
+    "auth": "AuthPort (JwtAuthAdapter) enforces authentication on EVERY HTTP route and the WS handshake via a FastAPI dependency (get_principal) \u2014 fixes 'no auth on any endpoint' (Critical). RBAC authorize(principal, action, resource) gates per-appeal ownership for GET /appeals/{id}, /files, and the nurse queue \u2014 fixes 'unredacted GET /appeals' and '/files serves PHI unauthenticated' (Critical). A parametrized security test enumerates the whole route table so any new unguarded route fails CI.",
+    "phi_redaction_boundary": "Structural: RedactionPort (LocalRedactionAdapter) is the SOLE producer of domain.RedactedText; every egress port (LetterRenderPort, EventBusPort/WS, AuditLogPort, FileStorePort, TtsPort, and the outbound side of LLMGatewayPort/RetrievalPort/ReasoningPort) accepts ONLY RedactedText for PHI-bearing fields, so unredacted PHI is a type error at the boundary. Runtime defense-in-depth: each egress adapter calls redaction.contains_phi() and refuses on a hit. The LLM gateway redacts on BOTH the outbound prompt and the inbound completion. Fixes: PHI-streamed-to-WS-unredacted, PHI-in-cleartext-PDFs, incomplete redact_phi (now hypothesis-fuzzed for member/NPI/SSN/DOB/claim patterns).",
+    "baa_gated_routing": "Sponsors WITHOUT a BAA (MiniMax, Qwen/DashScope, Moss) sit strictly on the redacted side of the TrueFoundry boundary \u2014 the Service redacts via RedactionPort before any byte reaches them, and VoiceTurnService/RebuttalService assert PHI-clean before the call. PAVO and the ConcurrencyGate never receive PHI (telemetry + surrogate appeal_id only). The composition root wires these adapters so they are unreachable except through a redaction step.",
+    "tamper_evident_audit": "AuditLogPort is a SHA-256 hash chain (each row's prev_hash = prior row's record_hash); verify_chain() recomputes and detects any field flip. The cryptographic sign-off gate (SignoffService) REQUIRES verify_chain()==True before SignaturePort.sign() and the atomic FILED transition; a broken chain raises and blocks filing. Audit stores hashes + token/cost metadata, never raw text. Sign-off is genuine Ed25519 over the redacted letter hash.",
+    "cors_csp_headers": "infra/security_headers.py installs a CORS allowlist from Settings (NO wildcard \u2014 fixes 'wildcard CORS' Critical), a strict CSP (fixes the DOM-XSS surface in web/ alongside per-component output encoding), plus HSTS, X-Content-Type-Options, X-Frame-Options=DENY, Referrer-Policy. WS upgrade checks Origin against the same allowlist (fixes 'no WS origin check' High).",
+    "path_traversal_fix": "TWO layers: (1) UnsiloedDenialParserAdapter and the ingestion controller only ever accept in-memory validated bytes + a declared ArtifactKind \u2014 there is NO code path that opens a server-side filesystem path from user input (fixes 'arbitrary file read in EOB parse' Critical at the source). (2) LocalFileStoreAdapter canonicalizes every ref and jails it to BACKSTOP_ARTIFACT_DIR, rejecting '..' and absolute paths; reads require a signed scope token + ownership authz (fixes path traversal + the /files PHI exposure).",
+    "other_hardening": [
+      "Upload size cap + content-type validation in ingestion_controller before buffering (fixes 'unbounded uploads', returns 413).",
+      "reportlab markup escaping of every free-text/PHI field in ReportlabLetterAdapter (fixes 'reportlab markup injection').",
+      "TaskSupervisorPort tracks every spawned task; FastAPI lifespan drains/cancels on shutdown (fixes 'fire-and-forget tasks' + 'no graceful shutdown').",
+      "ConcurrencyGatePort caps fan-out; AppealRepositoryPort is bounded (fixes 'no concurrency cap', 'threadpool starvation', 'unbounded APPEALS OOM').",
+      "update_status_atomic optimistic-lock CAS (fixes 'snapshot-watchdog race').",
+      "infra/logging.py: structured JSON + PHI-scrubbing filter (fixes 'no structured logging'); infra/config.py fails fast on invalid config (fixes 'no config/validation'); pydantic schemas validate every payload (fixes 'no input validation').",
+      "Lock held only across in-memory mutation, never across a vendor await (fixes 'lock-scope serializes the swarm')."
+    ]
+  },
+  "milestones": [
+    {
+      "id": "M0",
+      "title": "Scaffold + composition skeleton + architecture guard",
+      "deliverable": "orchestrator/backstop/ package tree (empty __init__.py per layer), pyproject.toml with pinned dev stack (pytest8, pytest-asyncio mode=auto, pytest-cov branch, pytest-httpx, hypothesis, freezegun, ruff, mypy --strict, bandit, pip-audit, diff-cover), infra/config.py (pydantic-settings, the only os.environ reader), an empty Container + build_container stub, and tests/arch/test_layering.py.",
+      "test_gate": "pytest tests/arch/test_layering.py -q PASSES (asserts: only config.py imports os.environ; no service imports a vendor SDK) AND `mypy --strict orchestrator/backstop` clean AND `ruff check` clean. CI lanes 1-2 green.",
+      "depends_on": [],
+      "interfaces": [
+        "infra/config.py",
+        "composition/container.py",
+        "tests/arch/test_layering.py"
+      ]
+    },
+    {
+      "id": "M1",
+      "title": "Domain kernel (entities, RedactedText, money, errors, aggregate, triage, routing_policy, carc_table)",
+      "deliverable": "All domain/ files: frozen dataclasses, AppealStatus state machine on appeal_aggregate.py, RedactedText NewType, Money/SolDeadline integer-cents, pure triage scoring + routing_policy rules + carc_table map.",
+      "test_gate": "tests/unit/test_domain_*.py 100% line+branch on triage.py, routing_policy.py, money.py, appeal_aggregate.py (state machine rejects FILED without signature event); RedactedText cannot be constructed from a raw str except via the redaction path (type/guard test). All green before proceeding.",
+      "depends_on": [
+        "M0"
+      ],
+      "interfaces": [
+        "domain/models.py",
+        "domain/redacted.py",
+        "domain/money.py",
+        "domain/errors.py",
+        "domain/appeal_aggregate.py",
+        "domain/triage.py",
+        "domain/routing_policy.py",
+        "domain/carc_table.py",
+        "domain/enums.py"
+      ]
+    },
+    {
+      "id": "M2",
+      "title": "PAVO RoutingPort + both bit-faithful adapters (always-real policy)",
+      "deliverable": "ports/routing_port.py + adapters/pavo/_coupling.py + torch_routing_adapter.py + numpy_routing_adapter.py + a one-time meta_controller_weights.npz export script for the torch-free path.",
+      "test_gate": "tests/contract/test_routing_port_contract.py (parametrized over torch+numpy, torch skipped if absent) GREEN: tiers()==(CLOUD_PREMIUM,HYBRID_BALANCED,ONDEVICE_FAST); route() deterministic over 100 calls; is_feasible(ONDEVICE_FAST, complexity=5)==False, is_feasible(CLOUD_PREMIUM, complexity=5)==True. PLUS test_numpy_matches_torch_bitfaithful: 0 argmax mismatches over >=2000 random obs, max abs logit err <1e-4 (VERIFIED 1.9e-6). PLUS test_torch_adapter_loads_released_weights: info['n_params_loaded']==85041 AND model.n_profiles==48 (NOT info['architecture'], which is None for the default meta_controller_best.pt raw-state_dict checkpoint \u2014 corrected guard); a spy asserts model.train was never called. PLUS test_collapse_thresholds_golden over all 48 indices (idx<2->edge, <29->hybrid, else cloud) and test_state_encoding_frozen (12-dim float32, byte-for-byte vs pavo_bench.turn_to_state_vector, defaults speaking_rate=0.4/ram=0.8/gpu=0.3/bandwidth=0.5/pitch_var=0.5 unchanged).",
+      "depends_on": [
+        "M1"
+      ],
+      "interfaces": [
+        "ports/routing_port.py",
+        "adapters/pavo/_coupling.py",
+        "adapters/pavo/torch_routing_adapter.py",
+        "adapters/pavo/numpy_routing_adapter.py"
+      ]
+    },
+    {
+      "id": "M3",
+      "title": "TrueFoundry RedactionPort + LocalRedactionAdapter (the PHI boundary)",
+      "deliverable": "ports/redaction_port.py + adapters/truefoundry/local_redaction_adapter.py + tf_redaction_adapter.py; RedactedText producer.",
+      "test_gate": "tests/unit/test_redaction.py + hypothesis fuzz: redact_text scrubs ALL of {member ID, NPI, SSN, DOB, claim#, name, phone} \u2014 a million-char fuzzed string leaves NO surviving PII regex (closes 'incomplete redact_phi' High); returns RedactedText + salted-hash placeholder map (never raw); contains_phi() true/false correct. 100% line+branch. tests/security/test_sec_redact_completeness.py green.",
+      "depends_on": [
+        "M1"
+      ],
+      "interfaces": [
+        "ports/redaction_port.py",
+        "adapters/truefoundry/local_redaction_adapter.py"
+      ]
+    },
+    {
+      "id": "M4",
+      "title": "TrueFoundry AuditLogPort (hash chain) + CostLedgerPort",
+      "deliverable": "ports/audit_log_port.py + cost_ledger_port.py + adapters hashchain_audit_adapter.py + cost_ledger_adapter.py + infra/db.py SQLite schema (audit, cost_ledger tables).",
+      "test_gate": "tests/unit/test_audit_chain.py: after N append() each prev_hash==sha256 of prior; flipping any field -> verify_chain()==False; records store hashes not raw text. tests/unit/test_cost_ledger.py: usage {1000,500} with price {in 0.15,out 0.60 /1K} -> 0.45 usd (integer micros); cost_to_date(appeal_id) sums only that appeal; sim and real use the SAME table. 100% on both. Sign-off precondition test: verify_chain() must be True before a sign succeeds.",
+      "depends_on": [
+        "M0",
+        "M3"
+      ],
+      "interfaces": [
+        "ports/audit_log_port.py",
+        "ports/cost_ledger_port.py",
+        "adapters/truefoundry/hashchain_audit_adapter.py",
+        "adapters/truefoundry/cost_ledger_adapter.py",
+        "infra/db.py"
+      ]
+    },
+    {
+      "id": "M5",
+      "title": "TrueFoundry LLMGatewayPort + both adapters (single LLM chokepoint)",
+      "deliverable": "ports/llm_gateway_port.py + adapters/truefoundry/tf_gateway_adapter.py (real) + sim_gateway_adapter.py (sim), both injected the SAME redaction/audit/cost singletons.",
+      "test_gate": "tests/contract/test_gateway_contract.py (both adapters): complete() redacts outbound (transport/engine sees 0 raw PHI) AND inbound; audit chain verifies; cost computed (sim cost>0, not faked). tests/adapters/test_tf_gateway.py (mocked httpx): POST endswith /chat/completions, Authorization Bearer, X-TFY-METADATA has appeal_id+stage; 429-then-200 retries once; persistent 500 -> GatewayError with NO success audit/cost written. test_sim_is_not_an_echo: compose_line output is NOT a substring of the prompt and changes with input; deterministic. tests/arch: services import LLMGatewayPort, never openai/httpx directly.",
+      "depends_on": [
+        "M3",
+        "M4"
+      ],
+      "interfaces": [
+        "ports/llm_gateway_port.py",
+        "adapters/truefoundry/tf_gateway_adapter.py",
+        "adapters/truefoundry/sim_gateway_adapter.py"
+      ]
+    },
+    {
+      "id": "M6",
+      "title": "Seed corpora + shared RunbookCorpus TF-IDF util",
+      "deliverable": "data/runbooks/*.md (>=CO-197 prior-auth, CO-50/CO-45 medical-necessity, N130 plan-provision, with front-matter) + data/carc_rarc.json + adapters/text/runbook_corpus.py (stdlib TF-IDF + cosine; sklearn optional). DECISION: stdlib TF-IDF (sklearn is absent on the host) keeps CI dependency-free.",
+      "test_gate": "tests/unit/test_runbook_corpus.py: query 'prior authorization not obtained' ranks the CO-197 chunk first with score>0 and the chunk text != the query (real ranking, not echo); 'not medically necessary' ranks CO-50 first; deterministic across runs. carc_rarc.json parses and CO-197 -> 'Precertification/authorization absent'.",
+      "depends_on": [
+        "M1"
+      ],
+      "interfaces": [
+        "data/runbooks/*.md",
+        "data/carc_rarc.json",
+        "adapters/text/runbook_corpus.py"
+      ]
+    },
+    {
+      "id": "M7",
+      "title": "Moss RetrievalPort + both adapters",
+      "deliverable": "ports/retrieval_port.py + adapters/moss/moss_http_adapter.py (real) + tfidf_retrieval_adapter.py (sim over RunbookCorpus).",
+      "test_gate": "tests/contract/test_retrieval_contract.py (both, real via httpx.MockTransport): retrieve() returns RetrievalResult, chunks are EvidenceChunk, len<=top_k, scores in [0,1] descending, source_mode in {real,sim}; no-match returns empty (not raise); backend 503 twice -> one retry then RetrievalError (domain, not httpx). test_sim_does_real_retrieval_not_echo. test_real_rejects_phi_in_query (zero requests on PHI). test_real_adapter auth headers present, key != project_id.",
+      "depends_on": [
+        "M6"
+      ],
+      "interfaces": [
+        "ports/retrieval_port.py",
+        "adapters/moss/moss_http_adapter.py",
+        "adapters/moss/tfidf_retrieval_adapter.py"
+      ]
+    },
+    {
+      "id": "M8",
+      "title": "Unsiloed DenialParserPort + both adapters (Stage-0 ingestion engine)",
+      "deliverable": "ports/denial_parser_port.py + adapters/unsiloed/unsiloed_http_adapter.py (real) + deterministic_parser_adapter.py (sim: X12 + EOB regex + carc_table).",
+      "test_gate": "tests/contract/test_parser_contract.py (both): DenialExtraction full field set, each ExtractedField confidence in [0,1] + provenance, needs_human_review bool. test_sim_edi_835_real_parse: synthetic 835 with CLP/CAS/NM1/DTM/MIA -> claim# from CLP01, carc_codes==['197'] from CAS, npi from NM109, DOS from DTM*472, confidence 1.0 (REAL X12 work). test_real_refuses_edi_falls_back: real.supports(EDI_835)==False, parse raises UnsupportedArtifact, service routes to sim. test_real_extract_happy_path_mocked: api-key header, schema_data stringified, POST /v2/extract then GET /extract/{id} poll, min_confidence_score->overall_confidence. test_confidence_gate_triggers_review.",
+      "depends_on": [
+        "M6"
+      ],
+      "interfaces": [
+        "ports/denial_parser_port.py",
+        "adapters/unsiloed/unsiloed_http_adapter.py",
+        "adapters/unsiloed/deterministic_parser_adapter.py"
+      ]
+    },
+    {
+      "id": "M9",
+      "title": "MiniMax ReasoningPort + both adapters",
+      "deliverable": "ports/reasoning_port.py + adapters/minimax/minimax_adapter.py (real) + local_reasoning_adapter.py (sim).",
+      "test_gate": "tests/contract/test_reasoning_contract.py (both): compose_line line<=max_words, citations subset of supplied evidence ids (never fabricated), grounded=False -> safe fallback; interpret_denial category/route in enums. test_minimax_sim_not_echo: two evidence sets -> two different grounded lines citing the best id; deterministic. test_minimax_real: native /v1/text/chatcompletion_v2?GroupId, base_resp.status_code!=0 on HTTP 200 -> MiniMaxApiError; malformed JSON -> one nudge then ambiguous=True; no PHI logged.",
+      "depends_on": [
+        "M7"
+      ],
+      "interfaces": [
+        "ports/reasoning_port.py",
+        "adapters/minimax/minimax_adapter.py",
+        "adapters/minimax/local_reasoning_adapter.py"
+      ]
+    },
+    {
+      "id": "M10",
+      "title": "Qwen SpeechSynthesisPort + both adapters",
+      "deliverable": "ports/speech_synthesis_port.py + adapters/qwen/qwen_tts_adapter.py (real) + sim_tts_adapter.py (sim DSP).",
+      "test_gate": "tests/contract/test_tts_contract.py (both): synth() returns a wave.open()-parseable RIFF/WAVE (nchannels==1, sampwidth==2, framerate==req.sample_rate, nframes>0, len>1KB \u2014 anti-stub gate). test_sim_duration_scales_with_text; test_sim_deterministic_bytes; test_sim_not_silence_not_noise (windowed RMS variance>0). test_real_synth_posts_correct_payload (mocked httpx) + fetch+validate WAV; expired/HTML url -> SynthError; 429 -> rate_limit with Retry-After. test_phi_precondition_guard: synth() refuses un-redacted text.",
+      "depends_on": [
+        "M3"
+      ],
+      "interfaces": [
+        "ports/speech_synthesis_port.py",
+        "adapters/qwen/qwen_tts_adapter.py",
+        "adapters/qwen/sim_tts_adapter.py"
+      ]
+    },
+    {
+      "id": "M11",
+      "title": "LiveKit VoiceTransportPort + both adapters",
+      "deliverable": "ports/voice_transport_port.py + adapters/livekit/livekit_adapter.py (real) + inprocess_transport_adapter.py (sim).",
+      "test_gate": "tests/contract/test_transport_contract.py (both, real via mocked LiveKitAPI): open_channel returns Channel with room_name+agent_token+future expires_at; bridge_nurse on unknown channel -> ChannelNotFound; close_channel idempotent. test_minted_token_is_valid_hs256 (both): jwt.decode under HS256 has iss==api_key, sub==identity, video grant room-scoped; tampered sig -> verify raises. test_inprocess_real_frame_delivery (nurse queue receives agent's published frame, agent doesn't get its own). test_max_participants_enforced. test_real_maps_vendor_errors_to_domain. test_aclose_graceful.",
+      "depends_on": [
+        "M1"
+      ],
+      "interfaces": [
+        "ports/voice_transport_port.py",
+        "adapters/livekit/livekit_adapter.py",
+        "adapters/livekit/inprocess_transport_adapter.py"
+      ]
+    },
+    {
+      "id": "M12",
+      "title": "AWS ConcurrencyGatePort + both adapters",
+      "deliverable": "ports/concurrency_gate_port.py + adapters/aws/semaphore_gate.py (sim) + fargate_gate.py (real).",
+      "test_gate": "tests/contract/test_gate_contract.py (both, real via fake ECS client): acquiring max slots succeed, the (max+1)th BLOCKS and only completes after a release; acquire(timeout) on full -> CapacityTimeout (same type both); release idempotent; 'async with gate.slot()' releases on exception; capacity invariant available==max-in_use. test_semaphore_real_backpressure: 50 workers vs max=10 -> exactly 10 inside simultaneously. test_fargate: run_task kwargs correct + NO PHI in overrides; poll PENDING->RUNNING; RESOURCE:FARGATE -> CapacityTimeout; lock never held across an AWS await (regression).",
+      "depends_on": [
+        "M1"
+      ],
+      "interfaces": [
+        "ports/concurrency_gate_port.py",
+        "adapters/aws/semaphore_gate.py",
+        "adapters/aws/fargate_gate.py"
+      ]
+    },
+    {
+      "id": "M13",
+      "title": "Persistence + FileStore + EventBus + Letter + Signature + Auth ports & adapters",
+      "deliverable": "ports + adapters for AppealRepository (sqlite+memory), FileStore (local jail+TTL+s3), EventBus (redacted-only WS), LetterRender (reportlab escaping), Signature (Ed25519), Auth (JWT/RBAC), Clock/IdGen/TaskSupervisor.",
+      "test_gate": "Per-port contract suites green: repo update_status_atomic CAS rejects stale version + concurrency test (snapshot-watchdog race); MemoryAppealRepo evicts at capacity (10k inserts bounded RSS via tracemalloc); LocalFileStore rejects '../' and absolute paths + TTL sweeper deletes expired; LetterRender escapes <b>/<font>/XML in name (markup-injection); EventBus.publish accepts only RedactedText (type/guard); Ed25519 sign/verify + tampered fails; JwtAuth authenticate raises Unauthenticated on bad token + RBAC ownership.",
+      "depends_on": [
+        "M3",
+        "M4"
+      ],
+      "interfaces": [
+        "ports/appeal_repository_port.py",
+        "ports/file_store_port.py",
+        "ports/event_bus_port.py",
+        "ports/letter_render_port.py",
+        "ports/signature_port.py",
+        "ports/auth_port.py",
+        "ports/clock_port.py",
+        "ports/id_gen_port.py",
+        "ports/task_supervisor_port.py",
+        "adapters/persistence/*",
+        "adapters/filestore/*",
+        "adapters/eventbus/*",
+        "adapters/letter/*",
+        "adapters/signoff/*",
+        "adapters/auth/*",
+        "adapters/system/*"
+      ]
+    },
+    {
+      "id": "M14",
+      "title": "CallService (per-turn PAVO loop use-case)",
+      "deliverable": "services/call_service.py wired to RoutingPort, RetrievalPort, RedactionPort, ReasoningPort, SpeechSynthesisPort, VoiceTransportPort, IvrPort (all injected fakes/sims).",
+      "test_gate": "tests/services/test_call_service.py (sim ports as doubles): handle_turn calls route() exactly once BEFORE any LLM/ASR/TTS; CLOUD_PREMIUM tier selects premium reasoning, ONDEVICE_FAST does NOT call ReasoningPort; on the denial turn it retrieves+redacts BEFORE reasoning (no raw PHI reaches ReasoningPort); RoutingExplanation recorded to timeline once; a manual tier override that is_feasible()==False raises InfeasibleTierError; composed line forwarded to TTS+transport.",
+      "depends_on": [
+        "M2",
+        "M3",
+        "M7",
+        "M9",
+        "M10",
+        "M11"
+      ],
+      "interfaces": [
+        "services/call_service.py",
+        "adapters/ivr/ivr_sim_adapter.py",
+        "ports/ivr_port.py"
+      ]
+    },
+    {
+      "id": "M15",
+      "title": "SwarmService + ReconcileService (concurrent orchestrator)",
+      "deliverable": "services/swarm_service.py + reconcile_service.py.",
+      "test_gate": "tests/services/test_swarm_uses_gate.py (sim gate max=2, 5 appeals): never >2 _run_appeal bodies concurrent; every appeal acquires before its PAVO loop and releases in finally even on exception (capacity().in_use==0 at end); one channel opened+closed per call (spy). test_swarm_not_serialized: N parallel calls overlap (barrier assert \u2014 fixes lock-scope). ReconcileService finds the contradiction via gateway and returns Rebuttal with provenance.",
+      "depends_on": [
+        "M12",
+        "M14",
+        "M5"
+      ],
+      "interfaces": [
+        "services/swarm_service.py",
+        "services/reconcile_service.py"
+      ]
+    },
+    {
+      "id": "M16",
+      "title": "Ingestion + Triage + Appeal + Letter + Review + Signoff services",
+      "deliverable": "services/ingest_denial_service.py + ingestion_batch_service.py + triage_service.py + appeal_service.py + letter_service.py + review_service.py + signoff_service.py + nurse_bridge_service.py + auth_service.py.",
+      "test_gate": "Per-service tests with fake ports: ingest concurrency-capped + audit-wrapped + EDI falls back to sim; batch splits multi-claim EDI + throttles by capacity; triage orders by recoverable-$ x SOL; letter_service redacts BEFORE render (redact-then-emit, asserted); review exposes redacted timeline; signoff REQUIRES verify_chain()==True then atomic FILED, rejects tampered signature, NEVER auto-files (honesty contract); nurse_bridge issues short-TTL token.",
+      "depends_on": [
+        "M13",
+        "M15",
+        "M8"
+      ],
+      "interfaces": [
+        "services/ingest_denial_service.py",
+        "services/ingestion_batch_service.py",
+        "services/triage_service.py",
+        "services/appeal_service.py",
+        "services/letter_service.py",
+        "services/review_service.py",
+        "services/signoff_service.py",
+        "services/nurse_bridge_service.py",
+        "services/auth_service.py"
+      ]
+    },
+    {
+      "id": "M17",
+      "title": "Composition root + FastAPI controllers + middleware + lifespan",
+      "deliverable": "composition/adapter_factory.py + wiring.py + app.py; controllers/* (appeals, ingestion, review, triage, files, ws, schemas, dependencies); infra/security_headers.py + logging.py.",
+      "test_gate": "tests/composition/test_wiring.py: container.resolve(AppealService) fully wired, no missing binding; mode flags pick real vs sim per port; PAVO factory tries torch then falls back to numpy (singleton). tests/controllers/* via httpx.ASGITransport: every route + WS 401 without token; CORS rejects disallowed Origin (no wildcard); WS origin check; GET /appeals/{id} redacted; /files only via signed URL + ownership; upload size cap -> 413. Lifespan: startup reconcile(), shutdown drains tasks + closes clients (graceful).",
+      "depends_on": [
+        "M16"
+      ],
+      "interfaces": [
+        "composition/adapter_factory.py",
+        "composition/wiring.py",
+        "app.py",
+        "controllers/*",
+        "infra/security_headers.py",
+        "infra/logging.py"
+      ]
+    },
+    {
+      "id": "M18",
+      "title": "Security regression suite (24 audit findings, 1 test each) + E2E + load",
+      "deliverable": "tests/security/test_sec_*.py (>=24 named tests + the meta-test asserting all 24 IDs present) + tests/e2e/test_e2e_appeal.py (upload->swarm->review->sign->FILED, all sim, sandbox IVR, synthetic PHI) + tests/load/test_load_swarm.py.",
+      "test_gate": "All 24 security tests green (each maps 1:1 to a Critical/High finding); meta-test fails CI if any is deleted; bandit -ll + pip-audit --strict zero high-severity; schemathesis fuzz (auth bypass, traversal, oversize) clean. E2E: WS frames redacted, final letter verbatim+audit-grade, FILED requires sign-off, swarm places NO real call. Load: concurrency never exceeds cap, bounded RSS (tracemalloc), TTL PDFs cleaned, zero orphaned tasks after shutdown. Global branch coverage >=90%, pure-logic (redact/reconcile/triage/parsers) 100%, diff-cover 100%.",
+      "depends_on": [
+        "M17"
+      ],
+      "interfaces": [
+        "tests/security/test_sec_*.py",
+        "tests/e2e/test_e2e_appeal.py",
+        "tests/load/test_load_swarm.py"
+      ]
+    }
+  ],
+  "key_decisions": [
+    "CHOSE Proposal #1 (layer-grouped hexagon) as the canonical tree, MERGING in Proposal #2's best ideas (PHI-as-a-type RedactedText, integer-cents Money/SolDeadline, audit+cost as shared ports every service consumes, the Appeal aggregate state machine encoding the cross-feature pipeline). Rationale: #1 literally matches the user's 'Controller->Service->Port->Adapter, one composition root' mandate, keeps one impure wiring file, and fits the existing orchestrator/backstop/ + pavo/router.py paths; #2's per-slice two-tier composition roots add file count and a shared-registry god-object risk without a payoff at hackathon scale. The product's bounded contexts are still honored as service files + domain aggregates, just under a technical-axis tree.",
+    "VERIFIED on disk: orchestrator/backstop/ does NOT exist yet \u2014 this is a GREENFIELD rebuild, not a refactor of running code. Only pavo-bench/ is present. Python is 3.9.6; torch 2.8.0 and numpy 2.0.2 are installed; sklearn is NOT. Decision: the Moss/MiniMax sim TF-IDF uses a stdlib RunbookCorpus util (sklearn optional accelerator) so CI has zero heavy ML deps and the torch-free numpy PAVO path stays clean.",
+    "VERIFIED + CORRECTED a flaw in the PAVO sponsor spec: the default checkpoint meta_controller_best.pt is a RAW state_dict, so load_pretrained returns info['architecture']==None. The spec's fail-fast guard `assert info['architecture']['n_profiles']==48` would CRASH. Corrected the M2 test_gate to assert info['n_params_loaded']==85041 (always present, verified) AND model.n_profiles==48. The dict-format meta_controller.pt does carry architecture={state_dim:12,hidden:256,n_profiles:48}.",
+    "VERIFIED PAVO numpy/torch bit-faithfulness empirically against the live checkpoint: 0 argmax mismatches over 2000 random 12-dim states, max abs logit error 1.9e-06, weight shapes W0[256,12]/W2[256,256]/W4[48,256]. This licenses NumpyPavoRoutingAdapter as BOTH the torch-free production fallback AND the canonical test double \u2014 it is the same frozen policy, not a degraded fake. PAVO is the one capability whose real and sim are policy-identical.",
+    "PHI redaction is enforced STRUCTURALLY: RedactionPort is the sole producer of RedactedText, and every egress port (LetterRender, EventBus/WS, AuditLog, FileStore, Tts, outbound LLM/Retrieval/Reasoning) accepts only RedactedText for PHI fields \u2014 making the six PHI-leak Critical/High vulns type errors at the boundary, with runtime contains_phi() defense-in-depth in each egress adapter.",
+    "TrueFoundry is split into FOUR single-responsibility ports (LLMGatewayPort, RedactionPort, AuditLogPort, CostLedgerPort) per the one-responsibility-per-file mandate; the gateway adapter is injected the same redaction/audit/cost singletons in both real and sim mode, so redaction + tamper-evident audit + priced cost are 100% real even in sim \u2014 only the upstream model proxy is stubbed (exactly the honesty contract).",
+    "Persistence is SQLite (WAL) behind AppealRepositoryPort/AuditLogPort/CostLedgerPort, replacing the unbounded global APPEALS dict; money stored as integer micros (no float); PHI columns are salted hashes only; audit/events/signoffs are append-only; FILED requires verify_chain()==True + Ed25519 signature + atomic status CAS in one transaction. The sim/test path uses a bounded LRU+TTL memory repo honoring the identical contract.",
+    "Every Critical/High audit vuln is mapped to a milestone test_gate: arbitrary-file-read+traversal (M8 bytes-only + M13 path-jail), no-auth+/files+GET-appeals (M13 AuthPort + M17 controllers), PHI-to-WS+PDF+incomplete-redact (M3 redaction + M13 EventBus/Letter), wildcard-CORS+WS-origin+CSP (M17), OOM+concurrency-cap+threadpool+lock-scope (M12+M15+M13 bounded repo), fire-and-forget+graceful-shutdown (M13 TaskSupervisor + M17 lifespan), reportlab-injection (M13), snapshot-race (M13 atomic CAS), structured-logging+config+validation (M0/M17), DOM-XSS (M17 web/)."
+  ],
+  "open_questions": [
+    "Moss live API contract is MEDIUM/LOW confidence (usemoss.dev is a newer vendor): exact auth header names (Authorization: Bearer + X-Moss-Project vs project-id-in-path) and whether an official `moss` PyPI SDK exists. The adapter isolates all header construction in one private method so a doc-drift fix is one line \u2014 but should we attempt a real sandbox call during the build to confirm, or ship sim-default and confirm headers later?",
+    "TrueFoundry inference host+path is MEDIUM confidence (two surfaces have shipped: llm-gateway.truefoundry.com vs <tenant>.truefoundry.cloud, and /api/inference/openai vs /api/llm/...). I made BASE_URL + INFERENCE_PATH env-configurable and validated at startup via models_list. Confirm the exact tenant/host you have provisioned so DEFAULT_MODEL preflight passes.",
+    "Unsiloed status-string casing ('Succeeded' vs 'succeeded'), 201-vs-200 on create, and whether large EDI .txt is accepted by /parse are flagged UNCERTAIN. Design already routes ALL raw EDI to the deterministic sim adapter (Unsiloed = image-only), so this only affects the real image path. OK to confirm casing against a live sandbox extract during M8?",
+    "MiniMax default model id and whether GroupId may also be a header (vs query param) are UNCERTAIN; pinned via MINIMAX_MODEL/MINIMAX_GROUP_ID + a selectable route. Which model tier do you want as default for compose_line (M2.1-highspeed) vs interpret_denial (M3)?",
+    "Database: SQLite is my default for a single-node hackathon RCM tool. Do you anticipate multi-node/horizontal scaling in this build (which would push to Postgres now)? The port abstraction makes the swap free, but the engine choice affects infra/db.py and the WAL concurrency assumptions.",
+    "data/runbooks/ corpus does not exist yet and is load-bearing for BOTH Moss-sim retrieval and MiniMax-sim reasoning (and seeds the real Moss index). How many runbooks / which payers + denial codes should the seed cover beyond the contract-test minimum (CO-197, CO-50/CO-45, N130)? A thin corpus weakens the demo's retrieval quality.",
+    "Voice/audio realism: the Qwen sim produces a length-correct formant-envelope WAV (not speech). For the dashboard demo, is a plausible voice-like tone acceptable, or do you want an optional offline real-TTS (e.g. pyttsx3/espeak) sim variant that produces intelligible speech at the cost of an extra system dependency?",
+    "PAVO weights export: should I commit a meta_controller_weights.npz (np.savez export of the six policy tensors) so the numpy adapter and CI run with ZERO torch dependency, or keep loading the .pt directly (which requires torch in the numpy adapter's load step)? The former makes the torch-free fallback genuinely torch-free; the latter avoids a second artifact to keep in sync."
+  ]
+}
