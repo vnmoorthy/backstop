@@ -37,7 +37,8 @@ A denial detonates into a **swarm of AI agents** that work the claim end to end:
 > Per-call model cost collapses **~4–6×** via PAVO. Scale to a 3,000-claim backlog → seven-figure recovery the hospital had given up on.
 
 <div align="center">
-<img src="docs/img/dashboard.png" alt="Backstop dashboard" width="760">
+<img src="docs/img/dashboard.png" alt="Backstop — 23-agent swarm orbiting the PAVO masked-router core" width="820">
+<br><sub>The 23-agent swarm — every agent routed through the PAVO masked-router core.</sub>
 </div>
 
 ## The 23-agent workforce
