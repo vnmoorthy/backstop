@@ -15,6 +15,10 @@ services:
     autoDeploy: true
     envVars:
       # ── set these as secrets in the Render dashboard (sync:false) ──
+      # Auth/signing secret for the hardened app — REQUIRED. The config layer
+      # fails fast if this is missing/default when BACKSTOP_MODE != 'sim'.
+      - key: BACKSTOP_AUTH_SECRET
+        generateValue: true
       - key: MINIMAX_API_KEY
         sync: false
       - key: MOSS_PROJECT_ID

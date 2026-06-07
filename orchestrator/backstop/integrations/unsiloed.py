@@ -19,13 +19,18 @@ class Unsiloed:
         self.base_url = os.getenv("UNSILOED_BASE_URL", "https://api.unsiloed.ai")
         self.mode = "real" if self.api_key else "sim"
 
-    def parse_eob(self, path_or_text: str) -> dict:
-        """Return a dict of Denial fields parsed from an EOB. Accepts a file path or raw text."""
+    def parse_eob(self, path_or_text: str, *, allow_path: bool = False) -> dict:
+        """Return a dict of Denial fields parsed from an EOB.
+
+        Accepts raw EOB text. ``allow_path`` is opt-in and TRUSTED-ONLY: when
+        True, a short input that is an existing file is read from disk (used by
+        the CLI). Network/upload callers MUST leave it False — otherwise an
+        uploaded body like ``/app/.env`` or ``/etc/passwd`` would be read off the
+        server's filesystem and leaked back as the parsed EOB (arbitrary file
+        disclosure).
+        """
         text = path_or_text or ""
-        # only treat the input as a file path if it is short, non-blank, and an
-        # actual file — Path("").exists() is True (resolves to "."), so a blank
-        # upload must NOT be read as a path (it raises IsADirectoryError).
-        if isinstance(text, str) and text.strip() and len(text) < 400:
+        if allow_path and isinstance(text, str) and text.strip() and len(text) < 400:
             try:
                 p = Path(text)
                 if p.is_file():

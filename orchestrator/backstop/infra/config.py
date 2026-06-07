@@ -13,8 +13,12 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Public placeholder secrets that must never reach a real deployment.
+_DEV_AUTH_SECRET = "dev-insecure-change-me"
+_DEV_LIVEKIT_SECRET = "dev-livekit-sim-secret"
 
 # Per-integration mode literal. ``real`` uses the vendor SDK/HTTP adapter;
 # ``sim`` uses the real-local-work adapter. Stored as a plain ``str`` constrained
@@ -186,6 +190,24 @@ class Settings(BaseSettings):
         if any(origin.strip() == "*" for origin in value):
             raise ValueError("CORS allowlist must not contain a wildcard '*'")
         return value
+
+    @model_validator(mode="after")
+    def _reject_dev_secrets_outside_sim(self) -> "Settings":
+        """Fail fast: a non-``sim`` deployment must not run on the public dev
+        secrets. The HS256 ``backstop_auth_secret`` gates every authenticated
+        route and signs file-download tokens — shipping the known default would
+        let anyone mint a valid JWT (full auth bypass + signed-URL forgery)."""
+        if self.backstop_mode != "sim":
+            if not self.backstop_auth_secret or self.backstop_auth_secret == _DEV_AUTH_SECRET:
+                raise ValueError(
+                    "BACKSTOP_AUTH_SECRET must be a strong non-default value when "
+                    "BACKSTOP_MODE != 'sim'"
+                )
+            if self.livekit_sim_secret == _DEV_LIVEKIT_SECRET:
+                raise ValueError(
+                    "LIVEKIT_SIM_SECRET must be overridden when BACKSTOP_MODE != 'sim'"
+                )
+        return self
 
     def mode_for(self, port: str) -> str:
         """Return the configured mode (``real``/``sim``) for a logical port.

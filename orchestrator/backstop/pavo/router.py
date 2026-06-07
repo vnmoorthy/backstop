@@ -89,7 +89,7 @@ class MaskedPAVORouter:
     def __init__(self, weights_path: str | Path | None = None, device: str = "cpu"):
         self.device = device
         self.model = MetaController().to(device).eval()
-        blob = torch.load(weights_path or _WEIGHTS, map_location=device)
+        blob = torch.load(weights_path or _WEIGHTS, map_location=device, weights_only=True)
         state = blob.get("model_state_dict", blob) if isinstance(blob, dict) else blob
         self.model.load_state_dict(state)
         self.profiles = build_profiles()
