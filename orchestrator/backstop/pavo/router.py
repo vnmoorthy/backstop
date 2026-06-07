@@ -134,8 +134,13 @@ class MaskedPAVORouter:
             feasible = N_PROFILES
 
         tier = profile_to_tier(idx)
-        pavo_cost = TIER_PRICE[tier] * (tokens / 1000.0)
-        frontier_cost = TIER_PRICE["frontier"] * (tokens / 1000.0)
+        # Per-inference-step cost by tier. A voice agent runs one model inference
+        # per conversational turn (including every "still holding?" check during a
+        # 14-minute hold), so the cost is tier-dominated, not token-dominated. The
+        # collapse comes from running a near-free local model through the hold and
+        # spending frontier only on the 2-3 denial-reason turns.
+        pavo_cost = TIER_PRICE[tier]
+        frontier_cost = TIER_PRICE["frontier"]
         return RouteDecision(
             turn_id=turn_id,
             profile_idx=idx,
