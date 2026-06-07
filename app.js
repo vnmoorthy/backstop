@@ -259,7 +259,8 @@
     if (sb) sb.onclick = () => {
       sb.textContent = "✓ Signed & filed"; sb.classList.add("signed");
       if (els.ocFoot) { els.ocFoot.textContent = "filed · nurse-signed"; els.ocFoot.classList.add("signed"); }
-      toast("Appeal filed (nurse-signed).");
+      toast("Appeal filed (nurse-signed). Deploying the AI workforce…");
+      deployWorkforce();
     };
   }
 
@@ -322,6 +323,69 @@
     renderCost({ pavo_total: 0, frontier_total: 0, ratio: 1, tier_counts: {} });
   }
   function toast(msg) { els.toast.textContent = msg; els.toast.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => els.toast.hidden = true, 3200); }
+
+  // ===================== AI workforce deploy (on nurse sign-off) =====================
+  const WF_PHASES = ["Intake", "Triage", "Prep", "Call", "Reason", "Draft", "File", "Recover", "Learn"];
+  const WORKFORCE = [
+    { n: "Intake Agent", s: "Unsiloed", p: "Intake" }, { n: "Document Agent", s: "Unsiloed", p: "Intake" },
+    { n: "Triage Agent", s: "PAVO", p: "Triage" }, { n: "Disposition Agent", s: "MiniMax", p: "Triage" },
+    { n: "PAVO Router", s: "PAVO", p: "Prep" }, { n: "Eligibility Agent", s: "", p: "Prep" }, { n: "Prior-Auth Agent", s: "Moss", p: "Prep" },
+    { n: "Records Agent", s: "Moss", p: "Prep" }, { n: "Coding Agent", s: "MiniMax", p: "Prep" }, { n: "Supervisor Agent", s: "AWS", p: "Prep" },
+    { n: "Provider-Line Caller", s: "LiveKit", p: "Call" }, { n: "Billing-Office Caller", s: "LiveKit", p: "Call" }, { n: "Records-Desk Caller", s: "LiveKit", p: "Call" },
+    { n: "IVR Navigator", s: "MiniMax", p: "Call" }, { n: "Voice Agent", s: "Qwen", p: "Call" },
+    { n: "Rebuttal Retrieval", s: "Moss", p: "Reason" }, { n: "Reconciler Agent", s: "", p: "Reason" },
+    { n: "Letter Writer", s: "MiniMax", p: "Draft" }, { n: "Compliance Agent", s: "TrueFoundry", p: "Draft" },
+    { n: "Filing Agent", s: "", p: "File" }, { n: "Status Tracker", s: "", p: "Recover" }, { n: "Recovery & Billing", s: "", p: "Recover" }, { n: "Learning Agent", s: "PAVO", p: "Learn" },
+  ];
+  // Always-visible roster on the dashboard so every agent is on the live site.
+  function renderWorkforce() {
+    const body = document.getElementById("workforce-body");
+    if (!body) return;
+    body.innerHTML =
+      '<div style="display:flex;flex-wrap:wrap;gap:10px">' +
+      WF_PHASES.map((ph) => {
+        const ags = WORKFORCE.filter((a) => a.p === ph);
+        return '<div style="flex:1;min-width:158px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);padding:11px 12px">' +
+          '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-faint);font-weight:700;margin-bottom:9px">' + ph + '</div>' +
+          ags.map((a) =>
+            '<div style="display:flex;align-items:center;gap:7px;padding:3px 0">' +
+            '<span style="width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none"></span>' +
+            '<span style="font-size:11px;color:var(--text);flex:1;line-height:1.3">' + esc(a.n) + '</span>' +
+            (a.s ? '<span style="font-size:9px;color:var(--text-faint);font-family:ui-monospace,monospace">' + esc(a.s) + '</span>' : "") +
+            '</div>').join("") +
+          '</div>';
+      }).join("") + '</div>';
+  }
+  function deployWorkforce() {
+    if (document.getElementById("wf-ov")) return;
+    const ov = document.createElement("div");
+    ov.id = "wf-ov";
+    ov.style.cssText = "position:fixed;inset:0;z-index:200;background:rgba(4,5,8,.88);backdrop-filter:blur(7px);display:flex;align-items:center;justify-content:center;padding:24px;animation:wffade .2s ease";
+    ov.innerHTML =
+      '<div style="width:min(1000px,95vw);max-height:92vh;overflow:auto;background:#131720;border:1px solid #2E3744;border-radius:16px;padding:22px 24px;box-shadow:0 24px 70px rgba(0,0,0,.65)">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center"><div style="font-size:18px;font-weight:750;color:#E6E8EB;letter-spacing:-.01em">✓ Nurse signed — deploying the AI workforce</div>' +
+      '<button id="wf-x" style="background:#1E242F;border:1px solid #232A35;color:#8B929C;border-radius:8px;padding:6px 11px;cursor:pointer;font-size:12px">close</button></div>' +
+      '<div style="font-size:12px;color:#8B929C;margin:6px 0 16px"><b id="wf-n" style="color:#35B97E">0</b>/23 specialized agents initiated to recover this claim end to end</div>' +
+      '<div id="wf-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(214px,1fr));gap:8px"></div></div>';
+    document.body.appendChild(ov);
+    document.getElementById("wf-x").onclick = () => ov.remove();
+    const grid = document.getElementById("wf-grid"), counter = document.getElementById("wf-n");
+    let lit = 0;
+    WORKFORCE.forEach((a, i) => {
+      const name = a.n, sponsor = a.s;
+      const c = document.createElement("div");
+      c.style.cssText = "display:flex;align-items:center;gap:9px;padding:10px 12px;border:1px solid #232A35;border-radius:9px;background:#171C26;opacity:.22;transform:translateY(5px);transition:opacity .18s ease,transform .18s ease,border-color .18s ease";
+      c.innerHTML = '<span class="wfd" style="width:8px;height:8px;border-radius:50%;background:#5B636E;flex:none;transition:all .18s ease"></span>' +
+        '<span style="font-size:12px;color:#E6E8EB;font-weight:550;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(name) + '</span>' +
+        (sponsor ? '<span style="font-size:9px;color:#8B929C;font-family:ui-monospace,monospace">' + esc(sponsor) + '</span>' : "");
+      grid.appendChild(c);
+      setTimeout(() => {
+        c.style.opacity = "1"; c.style.transform = "translateY(0)"; c.style.borderColor = "#2E3744";
+        const d = c.querySelector(".wfd"); d.style.background = "#35B97E"; d.style.boxShadow = "0 0 0 3px rgba(53,185,126,.20)";
+        counter.textContent = String(++lit);
+      }, 90 + i * 42);
+    });
+  }
   function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
   let ws;
@@ -376,6 +440,7 @@
 
   // boot
   loadSamples();
+  renderWorkforce();
   resize();
   connect();
 })();
