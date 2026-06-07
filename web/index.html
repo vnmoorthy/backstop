@@ -4,16 +4,57 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Backstop — Denied-Claim Recovery</title>
-  <!-- No CDN: self-contained design system in styles.css, system font stack. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="styles.css" />
 </head>
 
 <body>
   <div class="bg-glow" aria-hidden="true"></div>
 
-  <div class="app">
+  <!-- ============================ MARKETING NAV ============================ -->
+  <nav class="nav">
+    <div class="nav-inner">
+      <a class="nav-brand" href="#top">
+        <span class="nav-logo" aria-hidden="true"></span>
+        <span class="nav-word">BACK<b>STOP</b>
+          <small>Denied-Claim Recovery · built on PAVO</small></span>
+      </a>
+      <div class="nav-links">
+        <a href="#dashboard">Live</a>
+        <a href="#workforce">How it works</a>
+        <a href="https://github.com/vnmoorthy/backstop" target="_blank" rel="noopener">GitHub</a>
+      </div>
+      <a class="nav-cta" href="#dashboard">Work a denial</a>
+    </div>
+  </nav>
+
+  <div class="app" id="top">
+
+    <!-- ============================ HERO ============================ -->
+    <section class="hero">
+      <div class="hero-eyebrow"><span class="dot"></span> Live · 23-agent swarm · PAVO routing · TMLR 2026</div>
+      <h1>Recover the denials <br />they <span class="accent">wrote off.</span></h1>
+      <p class="hero-sub">
+        A real-time swarm of <b>23 specialized AI agents</b> parses the EOB, finds the overturning
+        contradiction, and drafts a verbatim appeal letter — routed across local, mid, and frontier
+        tiers by <b>PAVO</b> so it costs a fraction of all-frontier. <b>Contingency billing:</b>
+        we only win when the claim does.
+      </p>
+      <div class="hero-actions">
+        <a href="#dashboard" class="btn btn-primary">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 3l14 9-14 9V3z" fill="currentColor" /></svg>
+          Work a denial
+        </a>
+        <a href="https://github.com/vnmoorthy/backstop" target="_blank" rel="noopener" class="btn btn-ghost">GitHub repo</a>
+      </div>
+      <div class="hero-foot">
+        <span>PAVO routing · TMLR 2026</span> · local cheap → cloud expensive · human nurse sign-off required
+      </div>
+    </section>
 
     <!-- ============================ TOP BAR ============================ -->
+    <div id="dashboard"></div>
     <header class="topbar">
       <div class="brand">
         <div class="brand-logo" aria-hidden="true"></div>
@@ -168,7 +209,7 @@
     </div>
 
     <!-- ===================== AI WORKFORCE (always visible) ===================== -->
-    <section style="margin-top:18px">
+    <section style="margin-top:18px" id="workforce">
       <div class="card">
         <div class="card-head">
           <h2 class="card-title">AI Workforce</h2>

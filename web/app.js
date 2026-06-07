@@ -61,7 +61,7 @@
 
   function coreCenter() { return { x: W / 2, y: H / 2 }; }
 
-  const TIER_COLOR = { frontier: "#D8A23A", mid_reason: "#4F7CFF", local_fast: "#35B97E" };
+  const TIER_COLOR = { frontier: "#f472b6", mid_reason: "#fbbf24", local_fast: "#00d49a" };
 
   function fireParticle(agentId, tier) {
     const cell = state.cells[agentId];
@@ -362,10 +362,10 @@
     ov.id = "wf-ov";
     ov.style.cssText = "position:fixed;inset:0;z-index:200;background:rgba(4,5,8,.88);backdrop-filter:blur(7px);display:flex;align-items:center;justify-content:center;padding:24px;animation:wffade .2s ease";
     ov.innerHTML =
-      '<div style="width:min(1000px,95vw);max-height:92vh;overflow:auto;background:#131720;border:1px solid #2E3744;border-radius:16px;padding:22px 24px;box-shadow:0 24px 70px rgba(0,0,0,.65)">' +
-      '<div style="display:flex;justify-content:space-between;align-items:center"><div style="font-size:18px;font-weight:750;color:#E6E8EB;letter-spacing:-.01em">✓ Nurse signed — deploying the AI workforce</div>' +
-      '<button id="wf-x" style="background:#1E242F;border:1px solid #232A35;color:#8B929C;border-radius:8px;padding:6px 11px;cursor:pointer;font-size:12px">close</button></div>' +
-      '<div style="font-size:12px;color:#8B929C;margin:6px 0 16px"><b id="wf-n" style="color:#35B97E">0</b>/23 specialized agents initiated to recover this claim end to end</div>' +
+      '<div style="width:min(1000px,95vw);max-height:92vh;overflow:auto;background:#121215;border:1px solid #ffffff1a;border-radius:16px;padding:22px 24px;box-shadow:0 24px 70px rgba(0,0,0,.65)">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center"><div style="font-size:18px;font-weight:700;color:#fafafa;letter-spacing:-.01em">✓ Nurse signed — deploying the AI workforce</div>' +
+      '<button id="wf-x" style="background:#18181c;border:1px solid #ffffff1a;color:#a1a1a8;border-radius:8px;padding:6px 11px;cursor:pointer;font-size:12px">close</button></div>' +
+      '<div style="font-size:12px;color:#a1a1a8;margin:6px 0 16px"><b id="wf-n" style="color:#00d49a">0</b>/23 specialized agents initiated to recover this claim end to end</div>' +
       '<div id="wf-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(214px,1fr));gap:8px"></div></div>';
     document.body.appendChild(ov);
     document.getElementById("wf-x").onclick = () => ov.remove();
@@ -374,14 +374,14 @@
     WORKFORCE.forEach((a, i) => {
       const name = a.n, sponsor = a.s;
       const c = document.createElement("div");
-      c.style.cssText = "display:flex;align-items:center;gap:9px;padding:10px 12px;border:1px solid #232A35;border-radius:9px;background:#171C26;opacity:.22;transform:translateY(5px);transition:opacity .18s ease,transform .18s ease,border-color .18s ease";
-      c.innerHTML = '<span class="wfd" style="width:8px;height:8px;border-radius:50%;background:#5B636E;flex:none;transition:all .18s ease"></span>' +
-        '<span style="font-size:12px;color:#E6E8EB;font-weight:550;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(name) + '</span>' +
-        (sponsor ? '<span style="font-size:9px;color:#8B929C;font-family:ui-monospace,monospace">' + esc(sponsor) + '</span>' : "");
+      c.style.cssText = "display:flex;align-items:center;gap:9px;padding:10px 12px;border:1px solid #ffffff0d;border-radius:10px;background:#18181c;opacity:.22;transform:translateY(5px);transition:opacity .18s ease,transform .18s ease,border-color .18s ease";
+      c.innerHTML = '<span class="wfd" style="width:8px;height:8px;border-radius:50%;background:#45454d;flex:none;transition:all .18s ease"></span>' +
+        '<span style="font-size:12px;color:#fafafa;font-weight:500;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(name) + '</span>' +
+        (sponsor ? '<span style="font-size:9px;color:#a1a1a8;font-family:Geist Mono,ui-monospace,monospace">' + esc(sponsor) + '</span>' : "");
       grid.appendChild(c);
       setTimeout(() => {
-        c.style.opacity = "1"; c.style.transform = "translateY(0)"; c.style.borderColor = "#2E3744";
-        const d = c.querySelector(".wfd"); d.style.background = "#35B97E"; d.style.boxShadow = "0 0 0 3px rgba(53,185,126,.20)";
+        c.style.opacity = "1"; c.style.transform = "translateY(0)"; c.style.borderColor = "#ffffff1a";
+        const d = c.querySelector(".wfd"); d.style.background = "#00d49a"; d.style.boxShadow = "0 0 0 3px #00d49a29";
         counter.textContent = String(++lit);
       }, 90 + i * 42);
     });
@@ -405,7 +405,8 @@
   function replay() {
     const A = "AP-replay";
     const seq = [];
-    SPONSORS.forEach((n) => seq.push([60, { type: "sponsor.mode", name: n, mode: n === "pavo" ? "real" : "sim" }]));
+    const REAL = ["pavo", "moss", "truefoundry", "unsiloed", "minimax", "qwen", "livekit"];
+    SPONSORS.forEach((n) => seq.push([60, { type: "sponsor.mode", name: n, mode: REAL.includes(n) ? "real" : "sim" }]));
     seq.push([200, { type: "intake.parsed", denial: { payer: "Aetna", plan: "Aetna Choice POS II", denial_code: "CO-197", claim_id: "CLM-55-7741", cpt: ["99285"], billed_amount: 2480, date_of_service: "2026-03-14" }, required_specialists: ["provider_line", "prior_auth_desk", "records_desk"], sol_deadline: "2026-09-10" }]);
     seq.push([250, { type: "swarm.spawn", specialists: [
       { id: "provider_line", kind: "provider_line", label: "Aetna provider services", payer: "Aetna" },
