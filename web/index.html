@@ -3,17 +3,38 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Backstop — Denied-Claim Recovery</title>
+  <title>Backstop — 23-Agent AI Swarm for Denied-Claim Recovery</title>
+  <meta name="description" content="Backstop runs a real-time swarm of 23 specialized AI agents that parse the EOB, find the overturning contradiction, and draft a verbatim appeal letter — routed across local, mid, and frontier tiers by PAVO. Contingency billing: we only win when the claim does." />
+  <link rel="canonical" href="https://vnmoorthy.github.io/backstop/" />
+
+  <!-- Open Graph -->
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://vnmoorthy.github.io/backstop/" />
+  <meta property="og:title" content="Backstop — 23-Agent AI Swarm for Denied-Claim Recovery" />
+  <meta property="og:description" content="A real-time swarm of 23 specialized AI agents recovers denied claims — PAVO routing across local/mid/frontier tiers, contingency billing. We only win when the claim does." />
+  <meta property="og:image" content="https://vnmoorthy.github.io/backstop/og.png" />
+
+  <!-- Twitter -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Backstop — 23-Agent AI Swarm for Denied-Claim Recovery" />
+  <meta name="twitter:description" content="A real-time swarm of 23 specialized AI agents recovers denied claims — PAVO routing across local/mid/frontier tiers, contingency billing. We only win when the claim does." />
+  <meta name="twitter:image" content="https://vnmoorthy.github.io/backstop/og.png" />
+
+  <meta name="theme-color" content="#0a0a0b" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230a0a0b'/%3E%3Crect x='10' y='10' width='12' height='12' rx='4' fill='%2300d49a'/%3E%3C/svg%3E" />
+
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 
 <body>
+  <a href="#dashboard" class="skip-link">Skip to dashboard</a>
   <div class="bg-glow" aria-hidden="true"></div>
 
   <!-- ============================ MARKETING NAV ============================ -->
-  <nav class="nav">
+  <nav class="nav" aria-label="Primary">
     <div class="nav-inner">
       <a class="nav-brand" href="#top">
         <span class="nav-logo" aria-hidden="true"></span>
@@ -31,7 +52,7 @@
     </div>
   </nav>
 
-  <div class="app" id="top">
+  <main class="app" id="top">
 
     <!-- ============================ HERO ============================ -->
     <section class="hero">
@@ -227,9 +248,9 @@
       Synthetic data only · sandbox IVRs · human nurse sign-off required ·
       every integration shows its real / sim mode — nothing is misrepresented as live.
     </footer>
-  </div>
+  </main>
 
   <div id="toast" class="toast" hidden></div>
-  <script src="app.js"></script>
+  <script src="app.js" defer></script>
 </body>
 </html>
