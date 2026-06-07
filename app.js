@@ -29,7 +29,8 @@
   const SPONSOR_LABEL = { pavo: "PAVO", moss: "Moss", livekit: "LiveKit", truefoundry: "TrueFoundry",
     unsiloed: "Unsiloed", aws: "AWS", minimax: "MiniMax", qwen: "Qwen" };
 
-  const state = { cells: {}, running: false, billed: 0, agentCount: 0, lastRatio: 1 };
+  const state = { cells: {}, running: false, billed: 0, agentCount: 0, lastRatio: 1,
+    currentAppeal: null, gotEvent: false };
 
   // ---- load the seeded denials into the picker ----
   async function loadSamples() {
@@ -169,7 +170,10 @@
     "appeal.error": (e) => { setRunning(false); toast("Pipeline error: " + (e.error || "")); },
   };
 
-  function dispatch(ev) { const h = handlers[ev.type]; if (h) try { h(ev); } catch (_) {} }
+  function dispatch(ev) {
+    if (ev.appeal_id && ev.appeal_id === state.currentAppeal) state.gotEvent = true;
+    const h = handlers[ev.type]; if (h) try { h(ev); } catch (_) {}
+  }
 
   function renderSpec(e) {
     const d = (e.denial) || {};
@@ -256,11 +260,29 @@
   async function runAppeal() {
     if (state.running) return;
     setRunning(true); resetUI();
+    state.currentAppeal = null; state.gotEvent = false;
     try {
       const id = els.picker && els.picker.value ? ("?denial_id=" + encodeURIComponent(els.picker.value)) : "";
       const r = await fetch(API + "/appeals" + id, { method: "POST" });
       if (!r.ok) throw new Error("http " + r.status);
+      const data = await r.json();
+      state.currentAppeal = data.appeal_id;
+      // WS-miss watchdog: if the live stream delivered nothing (dropped socket,
+      // flaky wifi), pull the recorded snapshot and replay it so the stage is
+      // never blank. No-op when the WS worked.
+      setTimeout(() => snapshotFallback(data.appeal_id), 3500);
     } catch (err) { toast("Server unreachable — playing replay."); replay(); }
+  }
+
+  async function snapshotFallback(appealId) {
+    if (state.gotEvent || appealId !== state.currentAppeal) return; // live stream delivered
+    try {
+      const a = await (await fetch(API + "/appeals/" + appealId)).json();
+      if (!a.events || !a.events.length) return;
+      resetUI();
+      a.events.forEach((ev, i) => setTimeout(() => dispatch(ev), Math.min(i * 25, 1400)));
+      toast("Recovered via snapshot.");
+    } catch (_) {}
   }
   els.runBtn.addEventListener("click", runAppeal);
 
