@@ -36,6 +36,7 @@
     spec: $("spec-body"), reconcileCard: $("reconcile-card"), reconcileBody: $("reconcile-body"),
     letterCard: $("letter-card"), letterBody: $("letter-body"),
     composeCard: $("compose-card"), composeTag: $("compose-tag"), composeBody: $("compose-body"),
+    mossLiveCard: $("moss-live-card"), mossLiveTag: $("moss-live-tag"), mossLiveBody: $("moss-live-body"),
     stage: $("stage"), canvas: $("fx"), core: $("core"), cells: $("cells"), stageHint: $("stage-hint"),
     sponsorRow: $("sponsor-row"), toast: $("toast"),
     picker: $("sample-picker"),
@@ -272,6 +273,7 @@
     "cost.tick": (e) => renderCost(e),
     "moss.hit": (e) => renderMoss(e),
     "reconcile.found": (e) => renderReconcile(e),
+    "moss.live": (e) => renderMossLive(e),
     "agent.compose": (e) => renderCompose(e),
     "letter.ready": (e) => renderLetter(e),
     "appeal.done": (e) => { setRunning(false); renderOutcome(e); toast("Appeal worked. Awaiting nurse signature."); },
@@ -332,6 +334,18 @@
     els.composeTag.textContent = "MiniMax · " + (real ? "real" : "sim") + (e.model ? " · " + e.model : "");
     els.composeTag.style.color = real ? "var(--ok)" : "";
     els.composeBody.innerHTML = `<div class="letter-desc">${esc(e.text || "")}</div>`;
+  }
+
+  function renderMossLive(e) {
+    if (!els.mossLiveCard) return;
+    els.mossLiveCard.hidden = false;
+    const real = e.mode === "real";
+    els.mossLiveTag.textContent = (real ? "real" : "sim") + (e.ms != null ? " · " + e.ms + "ms" : "");
+    els.mossLiveTag.style.color = real ? "var(--ok)" : "";
+    const score = e.score != null ? Math.round(e.score * 100) : null;
+    els.mossLiveBody.innerHTML =
+      `<div class="letter-meta">⚡ semantic match${score != null ? ' · relevance <b style="color:var(--ok)">' + score + '%</b>' : ''}${e.ms != null ? ' · ' + e.ms + 'ms' : ''}</div>` +
+      `<div class="letter-desc">${esc(e.text || "")}</div>`;
   }
 
   function renderLetter(e) {
@@ -408,6 +422,7 @@
   function resetUI() {
     els.reconcileCard.hidden = true; els.letterCard.hidden = true; els.outcomeCard.hidden = true;
     if (els.composeCard) els.composeCard.hidden = true;
+    if (els.mossLiveCard) els.mossLiveCard.hidden = true;
     els.cells.innerHTML = ""; state.cells = {}; els.stageHint.style.display = "";
     renderCost({ pavo_total: 0, frontier_total: 0, ratio: 1, tier_counts: {} });
   }
@@ -527,6 +542,7 @@
       i++;
     });
     seq.push([260 + i * 70 + 200, { type: "reconcile.found", claim: "there is no prior authorization on file", evidence: "authorization A4471 was issued for that date of service", rep_turn_id: 10, evidence_turn_id: 3 }]);
+    seq.push([260 + i * 70 + 320, { type: "moss.live", mode: "real", score: 1.0, ms: 4.2, id: "co197", text: "CO-197 prior authorization absent. Run the auth-on-file lookup by the rendering NPI, not the billing NPI; the precertification on file satisfies the plan authorization requirement." }]);
     seq.push([260 + i * 70 + 350, { type: "agent.compose", mode: "real", model: "MiniMax-Text-01", text: "The claim was denied CO-197 in error: authorization A4471 was on file for the date of service, confirmed by the records desk — reprocess and pay." }]);
     seq.push([260 + i * 70 + 500, { type: "letter.ready", appeal_id: A, citations: ["RB-AETNA-CO197", "call-record"], pdf_url: "" }]);
     seq.push([260 + i * 70 + 700, { type: "appeal.done", cost: {} }]);
