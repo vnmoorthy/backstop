@@ -92,7 +92,9 @@ class TorchPavoRoutingAdapter:
             raise RetrievalError(f"PAVO checkpoint not found: {path}")
 
         try:
-            blob = torch.load(path, map_location=device)
+            # weights_only=True: never unpickle arbitrary objects from a
+            # checkpoint (RCE on load); we only need the tensor state dict.
+            blob = torch.load(path, map_location=device, weights_only=True)
             state = (
                 blob.get("model_state_dict", blob) if isinstance(blob, dict) else blob
             )

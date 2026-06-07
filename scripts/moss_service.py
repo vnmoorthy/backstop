@@ -31,6 +31,12 @@ except Exception:  # pragma: no cover
 
 INDEX = os.getenv("MOSS_INDEX", "backstop-appeals-rebuttals")
 PORT = int(os.getenv("MOSS_SERVICE_PORT", "8021"))
+# loopback only: this is a local bridge for the orchestrator, never a public
+# service. Override via MOSS_SERVICE_HOST only in a trusted network.
+HOST = os.getenv("MOSS_SERVICE_HOST", "127.0.0.1")
+# the dashboard never calls this directly (the orchestrator proxies it server-
+# side), so the only legitimate browser origin is the local dashboard.
+ALLOW_ORIGIN = os.getenv("MOSS_ALLOW_ORIGIN", "http://localhost:8000")
 
 # The winning-rebuttal corpus (one doc per denial pattern). In production this
 # is the compounding win-corpus; here it's the seed runbook set.
@@ -93,7 +99,8 @@ class Handler(BaseHTTPRequestHandler):
         payload = json.dumps(body).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", ALLOW_ORIGIN)
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
@@ -110,8 +117,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 self._send(200, _query_sync(q))
-            except Exception as exc:  # never 500 the demo
-                self._send(200, {"mode": "error", "error": str(exc)[:160]})
+            except Exception as exc:  # never 500 the demo; log detail server-side only
+                print(f"[moss] query error: {exc!r}", flush=True)
+                self._send(200, {"mode": "error", "error": "retrieval error"})
             return
         self._send(404, {"error": "not found"})
 
@@ -125,8 +133,8 @@ def _query_sync(q: str) -> dict:
 
 def main() -> None:
     asyncio.run(_ensure_index())
-    srv = HTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"[moss] retrieval service live on http://localhost:{PORT}  (GET /retrieve?q=…)", flush=True)
+    srv = HTTPServer((HOST, PORT), Handler)
+    print(f"[moss] retrieval service live on http://{HOST}:{PORT}  (GET /retrieve?q=…)", flush=True)
     srv.serve_forever()
 
 

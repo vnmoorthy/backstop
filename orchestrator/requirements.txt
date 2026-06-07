@@ -1,11 +1,12 @@
-# Backstop orchestrator
-torch>=2.1            # PAVO meta-controller
-numpy>=1.26
-fastapi>=0.115
-uvicorn[standard]>=0.30
-websockets>=12.0
-pydantic>=2.9
-python-multipart>=0.0.9   # denial file upload
-httpx>=0.28               # sponsor API clients
-pyyaml>=6.0               # sandbox IVR scripts
-reportlab>=4.0            # appeal-letter PDF
+# Backstop orchestrator — bounded pins (no unbounded `>=`: a malicious or
+# breaking future major could otherwise be pulled silently into the image).
+torch>=2.1,<3              # PAVO meta-controller
+numpy>=1.26,<3
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+websockets>=12.0,<16
+pydantic>=2.9,<3
+python-multipart>=0.0.9,<0.1   # denial file upload
+httpx>=0.28,<1                 # sponsor API clients
+pyyaml>=6.0,<7                 # sandbox IVR scripts
+reportlab>=4.0,<5             # appeal-letter PDF

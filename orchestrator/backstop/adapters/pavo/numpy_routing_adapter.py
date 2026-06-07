@@ -215,7 +215,7 @@ def _from_pt(path: Path) -> Dict[str, NDArray[np.float32]]:
             f".pt checkpoint: {exc}"
         ) from exc
     try:
-        blob = torch.load(path, map_location="cpu")
+        blob = torch.load(path, map_location="cpu", weights_only=True)
         state = blob.get("model_state_dict", blob) if isinstance(blob, dict) else blob
         return {
             str(key): np.asarray(tensor.detach().cpu().numpy(), dtype=np.float32)

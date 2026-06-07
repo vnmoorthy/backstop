@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import secrets
 import threading
 import time
 import uuid
@@ -20,7 +22,7 @@ from typing import Optional
 
 from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .integrations import make_clients, sponsor_modes
@@ -85,18 +87,39 @@ class ConnectionManager:
                     self.disconnect(ws)
 
 
+def _cors_origins() -> list[str]:
+    """Explicit CORS allowlist (never '*'). Override via BACKSTOP_CORS_ALLOW_ORIGINS
+    (comma-separated). Defaults to the local dashboard + the published Pages site.
+    A wildcard would let any website drive the API and read appeal data
+    cross-origin from a victim's browser."""
+    raw = os.getenv("BACKSTOP_CORS_ALLOW_ORIGINS", "")
+    if raw.strip():
+        return [o.strip() for o in raw.split(",") if o.strip() and o.strip() != "*"]
+    return [
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "https://vnmoorthy.github.io",
+    ]
+
+
 manager = ConnectionManager()
 app = FastAPI(title="Backstop", version="0.1.0")
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    CORSMiddleware,
+    allow_origins=_cors_origins(),
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
 )
 
 
 @app.middleware("http")
-async def _no_cache(request, call_next):
-    """Never serve a stale dashboard — the browser always gets fresh app.js/css."""
+async def _security_headers(request, call_next):
+    """Fresh dashboard + baseline hardening headers on every response."""
     resp = await call_next(request)
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "no-referrer"
     return resp
 
 
@@ -204,7 +227,9 @@ async def _run_pipeline(appeal_id: str, denial: Denial) -> None:
         emit("appeal.done", {"cost": out["cost"]})
     except Exception as exc:  # never leave the demo hanging silently
         APPEALS[appeal_id]["status"] = "error"
-        emit("appeal.error", {"error": str(exc)})
+        # log the detail server-side; never leak exception internals to clients
+        print(f"[backstop] pipeline error for {appeal_id}: {exc!r}", flush=True)
+        emit("appeal.error", {"error": "internal error"})
 
 
 def _mask_tail(value: str, keep: int = 4) -> str:
@@ -295,15 +320,24 @@ async def create_appeal(
     """Start an appeal. Pick a seeded sample by denial_id, upload an EOB, or default."""
     if denial is not None:
         raw = (await denial.read()).decode("utf-8", errors="ignore")
-        parsed = CLIENTS["unsiloed"].parse_eob(raw)
+        # allow_path stays False: an uploaded body must NEVER be read as a server
+        # filesystem path (that would disclose /app/.env, /etc/passwd, …).
+        parsed = CLIENTS["unsiloed"].parse_eob(raw, allow_path=False)
         denial_obj = _denial_from_dict(parsed)
     elif denial_id:
         denial_obj = _load_sample(denial_id)
     else:
         denial_obj = sample_denial()
 
-    appeal_id = "AP-" + uuid.uuid4().hex[:8]
-    APPEALS[appeal_id] = {"events": [], "status": "running", "denial": denial_obj.to_dict()}
+    # unguessable id (~72 bits) — the old 32-bit uuid4()[:8] was brute-forceable,
+    # and the appeal record / PDF filename are keyed off it.
+    appeal_id = "AP-" + secrets.token_urlsafe(12)
+    # store a redacted projection of the denial: GET /appeals/{id} returns this
+    # record, so the raw member id / NPIs / free text must never sit in it.
+    masked_denial = _redact_spec_for_wire(
+        {"denial": denial_obj.to_dict()}, CLIENTS["truefoundry"]
+    )["denial"]
+    APPEALS[appeal_id] = {"events": [], "status": "running", "denial": masked_denial}
     asyncio.create_task(_run_pipeline(appeal_id, denial_obj))
     return {"appeal_id": appeal_id}
 
@@ -328,9 +362,26 @@ async def stream(ws: WebSocket):
         manager.disconnect(ws)
 
 
-# --- static (registered last so API routes win) ------------------------------
+# --- generated appeal PDFs (guarded; NOT a raw directory mount) ---------------
 _OUT.mkdir(parents=True, exist_ok=True)
-app.mount("/files", StaticFiles(directory=str(_OUT)), name="files")
+_PDF_NAME = re.compile(r"^appeal_[A-Za-z0-9_\-]{6,48}\.pdf$")
+
+
+@app.get("/files/{name}")
+async def get_file(name: str):
+    """Serve only generated appeal PDFs. A raw StaticFiles mount over data/out
+    would also expose audit.jsonl and any other artifact, and the names would be
+    guessable — so we allow exactly ``appeal_<id>.pdf`` and re-check the resolved
+    path stays inside _OUT (defense against traversal)."""
+    if not _PDF_NAME.match(name):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    target = (_OUT / name).resolve()
+    if target.parent != _OUT.resolve() or not target.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(str(target), media_type="application/pdf")
+
+
+# --- static dashboard (registered last so API routes win) ---------------------
 if _WEB.exists():
     app.mount("/", StaticFiles(directory=str(_WEB), html=True), name="web")
 
@@ -338,7 +389,12 @@ if _WEB.exists():
 def main():
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    # default to loopback: an unauthenticated PHI-handling server must not bind
+    # all interfaces (LAN exposure at a venue). Set BACKSTOP_HOST=0.0.0.0 only
+    # in a trusted/containerized deployment.
+    host = os.getenv("BACKSTOP_HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":
