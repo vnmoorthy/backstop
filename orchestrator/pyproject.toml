@@ -142,6 +142,7 @@ ban-relative-imports = "all"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["D", "S101", "S105", "S106"]  # docstrings + asserts/secrets in tests
+"backstop/agents/roster.py" = ["E501"]  # one-line-per-agent data table reads better wide
 # Deliberate HTTP-semantic domain exception names (Unauthenticated/Forbidden/
 # ChannelNotFound) — clearer than an -Error suffix at the call site.
 "backstop/domain/errors.py" = ["N818"]
