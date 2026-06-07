@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  :root{
+    --bg-deep:#08080a; --bg-elev:#0e0f12; --ink:#e7eaf0; --muted:#8b93a7;
+    --mint:#00d49a; --cyan:#818cf8; --amber:#fbbf24; --line:#1b1e27;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{background:var(--bg-deep)}
+  .stage{
+    position:relative;width:1440px;height:940px;overflow:hidden;
+    background:
+      radial-gradient(1200px 760px at 50% 46%, rgba(0,212,154,.10), transparent 62%),
+      radial-gradient(900px 600px at 78% 14%, rgba(129,140,248,.08), transparent 60%),
+      linear-gradient(180deg,#0a0b0e 0%, #08080a 100%);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+    color:var(--ink);
+  }
+  /* header */
+  .hd{position:absolute;left:46px;top:40px;z-index:6}
+  .brand{display:flex;align-items:center;gap:13px}
+  .glyph{width:34px;height:34px;border-radius:9px;
+    background:linear-gradient(135deg,var(--mint),var(--cyan));
+    box-shadow:0 0 26px rgba(0,212,154,.45)}
+  .wm{font-size:25px;font-weight:800;letter-spacing:.14em}
+  .wm b{color:var(--mint)}
+  .sub{margin-top:9px;font-size:12.5px;letter-spacing:.34em;color:var(--muted);text-transform:uppercase}
+  .count{margin-top:16px;font-size:13px;color:var(--ink);opacity:.92}
+  .count b{color:var(--mint);font-weight:700}
+  /* legend */
+  .legend{position:absolute;right:44px;top:44px;z-index:6;text-align:right;
+    display:grid;grid-template-columns:auto auto;gap:7px 18px;justify-content:end}
+  .lg{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--muted);justify-content:flex-end}
+  .dot{width:9px;height:9px;border-radius:50%;box-shadow:0 0 9px currentColor}
+  /* core */
+  .core{position:absolute;left:720px;top:486px;transform:translate(-50%,-50%);z-index:5;text-align:center}
+  .orb{width:120px;height:120px;border-radius:50%;
+    background:radial-gradient(circle at 38% 34%, #b9ffe8, var(--mint) 42%, #017a59 100%);
+    box-shadow:0 0 0 10px rgba(0,212,154,.10), 0 0 0 26px rgba(0,212,154,.05), 0 0 70px rgba(0,212,154,.55);
+    position:relative}
+  .ring{position:absolute;inset:-34px;border-radius:50%;border:1px solid rgba(0,212,154,.22)}
+  .ring2{position:absolute;inset:-62px;border-radius:50%;border:1px solid rgba(0,212,154,.10)}
+  .core .lbl{margin-top:16px;font-size:15px;font-weight:800;letter-spacing:.22em;color:#eafff7}
+  .core .lbl2{margin-top:3px;font-size:10.5px;letter-spacing:.26em;color:var(--muted);text-transform:uppercase}
+  /* nodes */
+  .node{position:absolute;z-index:4;transform:translate(-50%,-50%);
+    display:flex;align-items:center;gap:8px;white-space:nowrap}
+  .nd{width:13px;height:13px;border-radius:50%;flex:0 0 auto;
+    box-shadow:0 0 12px currentColor, 0 0 0 4px rgba(255,255,255,.04)}
+  .ndlbl{font-size:12.5px;font-weight:600;color:#dfe4ee;letter-spacing:.01em}
+  .ndsub{font-size:10px;color:var(--muted);font-weight:500}
+  .node.r .nm{display:flex;flex-direction:column;gap:1px}
+  .node.l{flex-direction:row-reverse}
+  .node.l .nm{text-align:right}
+  .node.l .nm{display:flex;flex-direction:column;gap:1px;align-items:flex-end}
+  svg.wires{position:absolute;inset:0;z-index:1;width:1440px;height:940px}
+  .foot{position:absolute;left:46px;bottom:30px;z-index:6;font-size:11.5px;color:var(--muted);letter-spacing:.04em}
+  .foot b{color:#cfd4e0;font-weight:600}
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+  <svg class="wires" id="wires" viewBox="0 0 1440 940"></svg>
+
+  <div class="hd">
+    <div class="brand"><div class="glyph"></div>
+      <div class="wm">BACK<b>STOP</b></div></div>
+    <div class="sub">Voice-agent swarm · denied-claim recovery</div>
+    <div class="count"><b>23 specialized agents</b> · one PAVO core · 8 sponsor stacks</div>
+  </div>
+
+  <div class="legend" id="legend"></div>
+
+  <div class="core">
+    <div class="orb"><div class="ring"></div><div class="ring2"></div></div>
+    <div class="lbl">PAVO</div>
+    <div class="lbl2">masked router core</div>
+  </div>
+
+  <div class="foot">Every agent routes through the PAVO masked router · <b>4–6× cheaper</b> than frontier · synthetic data · human nurse sign-off</div>
+</div>
+
+<script>
+const CX=720, CY=486;
+const PHASE_COLOR={
+  intake:'#818cf8', triage:'#fbbf24', route:'#00d49a', call:'#f472b6',
+  reason:'#38bdf8', draft:'#a78bfa', file:'#fb923c', recover:'#34d399', learn:'#facc15'
+};
+const PHASE_ORDER=['intake','triage','route','call','reason','draft','file','recover','learn'];
+const AGENTS=[
+  ['Intake Agent','Unsiloed','intake'],
+  ['Document Agent','Unsiloed','intake'],
+  ['Triage Agent','PAVO','triage'],
+  ['Disposition Agent','MiniMax','triage'],
+  ['PAVO Router','PAVO','route'],
+  ['Eligibility Agent','','route'],
+  ['Prior-Auth Agent','Moss','route'],
+  ['Records Agent','Moss','route'],
+  ['Coding Agent','MiniMax','route'],
+  ['Supervisor Agent','AWS','route'],
+  ['Provider-Line Caller','LiveKit','call'],
+  ['Billing-Office Caller','LiveKit','call'],
+  ['Records-Desk Caller','LiveKit','call'],
+  ['IVR Navigator','MiniMax','call'],
+  ['Voice Agent','Qwen','call'],
+  ['Rebuttal Retrieval','Moss','reason'],
+  ['Reconciler Agent','','reason'],
+  ['Letter Writer','MiniMax','draft'],
+  ['Compliance Agent','TrueFoundry','draft'],
+  ['Filing Agent','','file'],
+  ['Status Tracker','','recover'],
+  ['Recovery & Billing','','recover'],
+  ['Learning Agent','PAVO','learn'],
+];
+
+// legend
+const legend=document.getElementById('legend');
+PHASE_ORDER.forEach(p=>{
+  const el=document.createElement('div'); el.className='lg';
+  el.innerHTML=`<span>${p}</span><span class="dot" style="color:${PHASE_COLOR[p]}"></span>`;
+  legend.appendChild(el);
+});
+
+const wires=document.getElementById('wires');
+const stage=document.getElementById('stage');
+const N=AGENTS.length;            // 23
+const R_IN=232, R_OUT=372;
+const start=-Math.PI/2;           // 12 o'clock
+const SVGNS='http://www.w3.org/2000/svg';
+
+AGENTS.forEach((a,i)=>{
+  const [name,sponsor,phase]=a;
+  const ang=start + i*(2*Math.PI/N);
+  const r = (i%2===0) ? R_OUT : R_IN;      // alternate radius → labels never collide
+  const x = CX + r*Math.cos(ang);
+  const y = CY + r*Math.sin(ang);
+  const col=PHASE_COLOR[phase];
+
+  // wire core -> node
+  const line=document.createElementNS(SVGNS,'line');
+  line.setAttribute('x1',CX); line.setAttribute('y1',CY);
+  line.setAttribute('x2',x);  line.setAttribute('y2',y);
+  line.setAttribute('stroke',col); line.setAttribute('stroke-opacity','0.22');
+  line.setAttribute('stroke-width','1.1');
+  wires.appendChild(line);
+
+  // glow wire underlay
+  const glow=document.createElementNS(SVGNS,'line');
+  glow.setAttribute('x1',CX); glow.setAttribute('y1',CY);
+  glow.setAttribute('x2',x);  glow.setAttribute('y2',y);
+  glow.setAttribute('stroke',col); glow.setAttribute('stroke-opacity','0.06');
+  glow.setAttribute('stroke-width','5');
+  wires.insertBefore(glow, wires.firstChild);
+
+  // travelling bullet (static, ~0.6 out from core; brighter every 4th)
+  const t = 0.58 + ((i*37)%23)/23*0.14;   // vary position so it reads as motion
+  const bx = CX + (x-CX)*t, by = CY + (y-CY)*t;
+  const bullet=document.createElementNS(SVGNS,'circle');
+  bullet.setAttribute('cx',bx); bullet.setAttribute('cy',by);
+  bullet.setAttribute('r', (i%4===0)?4.4:3.2);
+  bullet.setAttribute('fill', (i%7===0)?'#ffffff':col);
+  bullet.setAttribute('fill-opacity','0.95');
+  wires.appendChild(bullet);
+  // bullet halo
+  const halo=document.createElementNS(SVGNS,'circle');
+  halo.setAttribute('cx',bx); halo.setAttribute('cy',by);
+  halo.setAttribute('r',8.5); halo.setAttribute('fill',col); halo.setAttribute('fill-opacity','0.16');
+  wires.appendChild(halo);
+
+  // node + label
+  const node=document.createElement('div');
+  const leftSide = Math.cos(ang) < -0.02;
+  node.className='node '+(leftSide?'l':'r');
+  node.style.left=x+'px'; node.style.top=y+'px';
+  node.innerHTML=
+    `<span class="nd" style="color:${col};background:${col}"></span>`+
+    `<span class="nm"><span class="ndlbl">${name}</span>`+
+    (sponsor?`<span class="ndsub">${sponsor}</span>`:`<span class="ndsub">core service</span>`)+
+    `</span>`;
+  stage.appendChild(node);
+});
+</script>
+</body>
+</html>
