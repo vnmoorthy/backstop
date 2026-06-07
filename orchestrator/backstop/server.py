@@ -123,6 +123,23 @@ def _make_emit(appeal_id: str, loop: asyncio.AbstractEventLoop):
     return emit
 
 
+def _moss_live(query: str) -> Optional[dict]:
+    """Query the live Moss retrieval service (the REAL Moss API, via the
+    scripts/moss_service.py bridge). Returns the result dict, or None if the
+    service isn't running — the demo then degrades to the local retriever."""
+    import httpx
+
+    url = os.getenv("MOSS_SERVICE_URL", "http://localhost:8021") + "/retrieve"
+    try:
+        r = httpx.get(url, params={"q": query}, timeout=4.0)
+        if r.status_code == 200:
+            data = r.json()
+            return data if data.get("mode") == "real" else None
+    except Exception:
+        pass
+    return None
+
+
 async def _run_pipeline(appeal_id: str, denial: Denial) -> None:
     loop = asyncio.get_running_loop()
     emit = _make_emit(appeal_id, loop)
@@ -140,6 +157,14 @@ async def _run_pipeline(appeal_id: str, denial: Denial) -> None:
             cd["claim"] = gw.redact_phi(cd.get("claim", ""))
             cd["evidence"] = gw.redact_phi(cd.get("evidence", ""))
             emit("reconcile.found", cd)
+
+            # LIVE Moss: the Rebuttal-Retrieval agent queries the REAL Moss index
+            # with the payer's denial assertion and surfaces the winning rebuttal
+            # via genuine semantic search (sub-12ms). Off-thread; degrades cleanly
+            # to the local retriever if the Moss service isn't running.
+            moss_hit = await asyncio.to_thread(_moss_live, contra.claim)
+            if moss_hit:
+                emit("moss.live", moss_hit)
 
             # REAL reasoning: compose the appeal argument with MiniMax, routed
             # through the TrueFoundry gateway (PHI redacted on the way out +
