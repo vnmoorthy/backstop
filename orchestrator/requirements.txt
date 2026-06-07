@@ -1,0 +1,11 @@
+# Backstop orchestrator
+torch>=2.1            # PAVO meta-controller
+numpy>=1.26
+fastapi>=0.115
+uvicorn[standard]>=0.30
+websockets>=12.0
+pydantic>=2.9
+python-multipart>=0.0.9   # denial file upload
+httpx>=0.28               # sponsor API clients
+pyyaml>=6.0               # sandbox IVR scripts
+reportlab>=4.0            # appeal-letter PDF
