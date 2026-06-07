@@ -18,6 +18,7 @@
     segFront: document.querySelector(".seg-front"),
     spec: $("spec-body"), reconcileCard: $("reconcile-card"), reconcileBody: $("reconcile-body"),
     letterCard: $("letter-card"), letterBody: $("letter-body"),
+    composeCard: $("compose-card"), composeTag: $("compose-tag"), composeBody: $("compose-body"),
     stage: $("stage"), canvas: $("fx"), core: $("core"), cells: $("cells"), stageHint: $("stage-hint"),
     sponsorRow: $("sponsor-row"), toast: $("toast"),
     picker: $("sample-picker"),
@@ -182,6 +183,7 @@
     "cost.tick": (e) => renderCost(e),
     "moss.hit": (e) => renderMoss(e),
     "reconcile.found": (e) => renderReconcile(e),
+    "agent.compose": (e) => renderCompose(e),
     "letter.ready": (e) => renderLetter(e),
     "appeal.done": (e) => { setRunning(false); renderOutcome(e); toast("Appeal worked. Awaiting nurse signature."); },
     "appeal.error": (e) => { setRunning(false); toast("Pipeline error: " + (e.error || "")); },
@@ -233,6 +235,14 @@
     els.reconcileBody.innerHTML =
       `<div class="ctr-block claim"><div class="ctr-label">Payer claim · turn ${esc(String(e.rep_turn_id))}</div><div class="ctr-q">"${esc(e.claim || "")}"</div></div>` +
       `<div class="ctr-block evi"><div class="ctr-label">Contradicted by record · turn ${esc(String(e.evidence_turn_id))}</div><div class="ctr-q">"${esc(e.evidence || "")}"</div></div>`;
+  }
+
+  function renderCompose(e) {
+    els.composeCard.hidden = false;
+    const real = e.mode === "real";
+    els.composeTag.textContent = "MiniMax · " + (real ? "real" : "sim") + (e.model ? " · " + e.model : "");
+    els.composeTag.style.color = real ? "var(--ok)" : "";
+    els.composeBody.innerHTML = `<div class="letter-desc">${esc(e.text || "")}</div>`;
   }
 
   function renderLetter(e) {
@@ -307,6 +317,7 @@
   function setRunning(v) { state.running = v; els.runBtn.disabled = v; }
   function resetUI() {
     els.reconcileCard.hidden = true; els.letterCard.hidden = true; els.outcomeCard.hidden = true;
+    if (els.composeCard) els.composeCard.hidden = true;
     els.cells.innerHTML = ""; state.cells = {}; els.stageHint.style.display = "";
     renderCost({ pavo_total: 0, frontier_total: 0, ratio: 1, tier_counts: {} });
   }
