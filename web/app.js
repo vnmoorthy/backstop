@@ -91,12 +91,16 @@
   function relayoutCells() {
     const ids = Object.keys(state.cells);
     const n = ids.length; if (!n) return;
-    const radius = Math.min(W, H) * 0.33;
+    const cx0 = W / 2, cy0 = H / 2;
+    // elliptical burst: use the stage's full width horizontally so cells fan out
+    // into a clean triangle/ring around the singularity instead of clustering.
+    const rx = Math.min(W * 0.36, 340);
+    const ry = H * 0.34;
+    const start = -Math.PI / 2 + (n === 2 ? Math.PI / 6 : 0); // top, then even
     ids.forEach((id, i) => {
-      // spread cells in a ring, starting at the top, biased to the right side
-      const ang = (-Math.PI / 2) + (i / n) * Math.PI * 2;
-      const cx = W / 2 + Math.cos(ang) * radius;
-      const cy = H / 2 + Math.sin(ang) * radius;
+      const ang = start + (i / n) * Math.PI * 2;
+      const cx = Math.max(120, Math.min(W - 120, cx0 + Math.cos(ang) * rx));
+      const cy = Math.max(70, Math.min(H - 70, cy0 + Math.sin(ang) * ry));
       const cell = state.cells[id];
       cell.center = { x: cx, y: cy };
       cell.el.style.left = cx + "px";

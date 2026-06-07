@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import uuid
 from pathlib import Path
@@ -34,7 +35,26 @@ _WEB = _REPO_ROOT / "web"
 _OUT = _REPO_ROOT / "data" / "out"
 _DENIALS = _REPO_ROOT / "data" / "denials"
 
-# --- singletons (built once) -------------------------------------------------
+
+def _load_dotenv() -> None:
+    """Load repo-root .env (if present) so sponsor keys flip badges to real.
+    No dependency; does not override already-set environment variables."""
+    env_path = _REPO_ROOT / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k, v = k.strip(), v.strip()
+        if k and v and k not in os.environ:
+            os.environ[k] = v
+
+
+_load_dotenv()
+
+# --- singletons (built once, after .env is loaded) ---------------------------
 ROUTER = MaskedPAVORouter()
 CLIENTS = make_clients()
 APPEALS: dict[str, dict] = {}  # appeal_id -> {events:[...], status}
