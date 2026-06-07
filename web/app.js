@@ -20,13 +20,28 @@
     letterCard: $("letter-card"), letterBody: $("letter-body"),
     stage: $("stage"), canvas: $("fx"), core: $("core"), cells: $("cells"), stageHint: $("stage-hint"),
     sponsorRow: $("sponsor-row"), toast: $("toast"),
+    picker: $("sample-picker"),
+    outcomeCard: $("outcome-card"), ocRecovered: $("oc-recovered"),
+    ocRatio: $("oc-ratio"), ocAgents: $("oc-agents"), ocFoot: $("oc-foot"),
   };
 
   const SPONSORS = ["pavo", "moss", "livekit", "truefoundry", "unsiloed", "aws", "minimax", "qwen"];
   const SPONSOR_LABEL = { pavo: "PAVO", moss: "Moss", livekit: "LiveKit", truefoundry: "TrueFoundry",
     unsiloed: "Unsiloed", aws: "AWS", minimax: "MiniMax", qwen: "Qwen" };
 
-  const state = { cells: {}, running: false };
+  const state = { cells: {}, running: false, billed: 0, agentCount: 0, lastRatio: 1 };
+
+  // ---- load the seeded denials into the picker ----
+  async function loadSamples() {
+    try {
+      const samples = await (await fetch(API + "/samples")).json();
+      els.picker.innerHTML = samples.map((s) =>
+        `<option value="${esc(s.denial_id)}">${esc(s.payer)} · ${esc(s.denial_code)} · $${Number(s.billed_amount).toLocaleString()}</option>`
+      ).join("");
+    } catch (_) {
+      els.picker.innerHTML = `<option value="">Aetna · CO-197 (default)</option>`;
+    }
+  }
 
   // ===================== canvas particle system =====================
   const ctx = els.canvas.getContext("2d");
@@ -111,6 +126,7 @@
   function spawnCells(specialists) {
     els.cells.innerHTML = "";
     state.cells = {};
+    state.agentCount = specialists.length;
     els.stageHint.style.display = "none";
     specialists.forEach((s) => {
       const el = document.createElement("div");
@@ -149,7 +165,7 @@
     "moss.hit": (e) => renderMoss(e),
     "reconcile.found": (e) => renderReconcile(e),
     "letter.ready": (e) => renderLetter(e),
-    "appeal.done": (e) => { setRunning(false); toast("Appeal worked. Awaiting nurse signature."); },
+    "appeal.done": (e) => { setRunning(false); renderOutcome(e); toast("Appeal worked. Awaiting nurse signature."); },
     "appeal.error": (e) => { setRunning(false); toast("Pipeline error: " + (e.error || "")); },
   };
 
@@ -157,6 +173,7 @@
 
   function renderSpec(e) {
     const d = (e.denial) || {};
+    state.billed = Number(d.billed_amount) || 0;
     const rows = [
       ["Payer", d.payer], ["Plan", d.plan], ["Denial code", d.denial_code, true],
       ["Claim", d.claim_id], ["CPT", (d.cpt || []).join(", ")],
@@ -171,6 +188,7 @@
   function renderCost(e) {
     els.pavo.textContent = "$" + Number(e.pavo_total || 0).toFixed(4);
     els.frontier.textContent = "$" + Number(e.frontier_total || 0).toFixed(4);
+    state.lastRatio = e.ratio || 1;
     els.ratio.textContent = (e.ratio || 1).toFixed(1) + "x";
     els.ratio.classList.remove("flash"); void els.ratio.offsetWidth; els.ratio.classList.add("flash");
     const tc = e.tier_counts || {}; const total = Math.max(1, (tc.local_fast || 0) + (tc.mid_reason || 0) + (tc.frontier || 0));
@@ -206,7 +224,19 @@
       (url ? `<a class="btn-link" href="${url}" target="_blank">Open PDF</a>` : "") +
       `<button class="btn-sign" id="sign-btn">Nurse: sign &amp; file</button></div>`;
     const sb = $("sign-btn");
-    if (sb) sb.onclick = () => { sb.textContent = "✓ Signed & filed"; sb.classList.add("signed"); toast("Appeal filed (nurse-signed)."); };
+    if (sb) sb.onclick = () => {
+      sb.textContent = "✓ Signed & filed"; sb.classList.add("signed");
+      if (els.ocFoot) { els.ocFoot.textContent = "filed · nurse-signed"; els.ocFoot.classList.add("signed"); }
+      toast("Appeal filed (nurse-signed).");
+    };
+  }
+
+  function renderOutcome(e) {
+    const ratio = (e.cost && e.cost.ratio) || state.lastRatio || 1;
+    els.ocRecovered.textContent = "$" + Number(state.billed || 0).toLocaleString();
+    els.ocRatio.textContent = ratio.toFixed(1) + "x";
+    els.ocAgents.textContent = state.agentCount || 0;
+    els.outcomeCard.hidden = false;
   }
 
   function renderSponsor(name, mode) {
@@ -227,7 +257,8 @@
     if (state.running) return;
     setRunning(true); resetUI();
     try {
-      const r = await fetch(API + "/appeals", { method: "POST" });
+      const id = els.picker && els.picker.value ? ("?denial_id=" + encodeURIComponent(els.picker.value)) : "";
+      const r = await fetch(API + "/appeals" + id, { method: "POST" });
       if (!r.ok) throw new Error("http " + r.status);
     } catch (err) { toast("Server unreachable — playing replay."); replay(); }
   }
@@ -235,7 +266,7 @@
 
   function setRunning(v) { state.running = v; els.runBtn.disabled = v; }
   function resetUI() {
-    els.reconcileCard.hidden = true; els.letterCard.hidden = true;
+    els.reconcileCard.hidden = true; els.letterCard.hidden = true; els.outcomeCard.hidden = true;
     els.cells.innerHTML = ""; state.cells = {}; els.stageHint.style.display = "";
     renderCost({ pavo_total: 0, frontier_total: 0, ratio: 1, tier_counts: {} });
   }
@@ -293,6 +324,7 @@
   }
 
   // boot
+  loadSamples();
   resize();
   connect();
 })();

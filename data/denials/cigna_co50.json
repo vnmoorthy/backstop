@@ -1,0 +1,15 @@
+{
+  "denial_id": "DEN-2026-0004",
+  "payer": "Cigna",
+  "plan": "Cigna Open Access Plus",
+  "state": "AZ",
+  "denial_code": "CO-50",
+  "cpt": ["62323"],
+  "billed_amount": 1640.00,
+  "date_of_service": "2026-04-11",
+  "member_id": "C338190274",
+  "claim_id": "CLM-63-9042",
+  "rendering_npi": "1346709988",
+  "billing_npi": "1281446530",
+  "raw_text": "CIGNA EXPLANATION OF BENEFITS\nClaim CLM-63-9042  DOS 04/11/2026  CPT 62323  Billed $1,640.00\nDENIAL CO-50: These are non-covered services because this is not deemed a medical necessity by the payer.\nMember C338190274  Plan: Cigna Open Access Plus (AZ)\nClinical note on file: 6 weeks of PT and NSAIDs failed, documented 2026-03-30.\nAppeal rights: written reconsideration within 180 days of this notice."
+}

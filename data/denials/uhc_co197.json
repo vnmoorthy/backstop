@@ -1,0 +1,15 @@
+{
+  "denial_id": "DEN-2026-0003",
+  "payer": "UnitedHealthcare",
+  "plan": "UnitedHealthcare Choice Plus",
+  "state": "OH",
+  "denial_code": "CO-197",
+  "cpt": ["73721"],
+  "billed_amount": 1180.00,
+  "date_of_service": "2026-03-22",
+  "member_id": "U447820156",
+  "claim_id": "CLM-77-3318",
+  "rendering_npi": "1558740022",
+  "billing_npi": "1902337764",
+  "raw_text": "UNITEDHEALTHCARE EXPLANATION OF BENEFITS\nClaim CLM-77-3318  DOS 03/22/2026  CPT 73721  Billed $1,180.00\nDENIAL CO-197: Precertification/authorization/notification absent.\nMember U447820156  Plan: UnitedHealthcare Choice Plus (OH)\nAppeal rights: written reconsideration within 180 days of this notice."
+}

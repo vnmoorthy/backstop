@@ -10,6 +10,8 @@
 
 `PAVO $0.024  ·  frontier $0.105  ·  4.4x cheaper per appeal` *(verified, this repo)*
 
+![Backstop dashboard](docs/img/dashboard.png)
+
 </div>
 
 ---

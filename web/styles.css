@@ -185,6 +185,27 @@ body { min-height: 100vh; }
 .sponsor.sim .sdot { background: var(--amber); }
 .sponsor .smode { font-size: 9px; text-transform: uppercase; letter-spacing: .08em; opacity: .8; }
 
+/* ---- denial picker ---- */
+.picker {
+  font-size: 12px; color: #cfd8ea; background: rgba(11,15,26,0.8);
+  border: 1px solid var(--edge); border-radius: 9px; padding: 8px 10px;
+  font-family: "JetBrains Mono", monospace; max-width: 230px; cursor: pointer;
+}
+.picker:focus { outline: none; border-color: rgba(62,242,196,0.4); }
+
+/* ---- outcome scoreboard ---- */
+.outcome-card {
+  background: linear-gradient(180deg, rgba(62,242,196,0.10), rgba(9,12,20,0.92));
+  border: 1px solid rgba(62,242,196,0.4); box-shadow: 0 0 30px rgba(62,242,196,0.15);
+}
+.outcome-head { font-size: 15px; font-weight: 800; color: var(--mint); margin-bottom: 12px; }
+.outcome-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 8px; text-align: center; }
+.outcome-grid > div { display: flex; flex-direction: column; }
+.oc-num { font-family: "JetBrains Mono", monospace; font-size: 22px; font-weight: 800; color: #eafff8; }
+.oc-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); }
+.outcome-foot { margin-top: 12px; font-size: 11px; color: var(--amber); text-align: center; }
+.outcome-foot.signed { color: var(--mint); }
+
 /* ---- toast ---- */
 .toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
   background: rgba(13,18,30,0.96); border: 1px solid var(--edge); color: #d7deec;

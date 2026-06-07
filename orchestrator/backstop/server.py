@@ -192,13 +192,31 @@ async def samples():
     return out
 
 
+def _load_sample(denial_id: str) -> Denial:
+    """Load a seeded synthetic denial by its denial_id; fall back to the default."""
+    if _DENIALS.exists():
+        for p in sorted(_DENIALS.glob("*.json")):
+            try:
+                d = json.loads(p.read_text())
+                if d.get("denial_id") == denial_id:
+                    return _denial_from_dict(d)
+            except Exception:
+                continue
+    return sample_denial()
+
+
 @app.post("/appeals")
-async def create_appeal(denial: Optional[UploadFile] = File(default=None)):
-    """Start an appeal. Optional EOB file upload (Unsiloed-parsed); else a sample."""
+async def create_appeal(
+    denial_id: Optional[str] = None,
+    denial: Optional[UploadFile] = File(default=None),
+):
+    """Start an appeal. Pick a seeded sample by denial_id, upload an EOB, or default."""
     if denial is not None:
         raw = (await denial.read()).decode("utf-8", errors="ignore")
         parsed = CLIENTS["unsiloed"].parse_eob(raw)
         denial_obj = _denial_from_dict(parsed)
+    elif denial_id:
+        denial_obj = _load_sample(denial_id)
     else:
         denial_obj = sample_denial()
 

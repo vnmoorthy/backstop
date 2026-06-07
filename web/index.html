@@ -66,16 +66,18 @@
         </div>
       </div>
 
-      <div class="flex items-center gap-4">
+      <div class="flex items-center gap-3">
         <!-- Connection state pill, driven by app.js -->
         <div id="conn-pill" class="conn-pill conn-down">
           <span class="dot"></span><span id="conn-label">connecting…</span>
         </div>
+        <!-- Denial picker, populated from /samples -->
+        <select id="sample-picker" class="picker" title="Choose a denial to work"></select>
         <button id="run-btn" class="run-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
             <path d="M5 3l14 9-14 9V3z" fill="currentColor" />
           </svg>
-          Run sample denial
+          Work this denial
         </button>
       </div>
     </header>
@@ -109,6 +111,17 @@
 
       <!-- LEFT COLUMN: intake spec + sponsor row + reconcile + letter -->
       <aside class="col-span-12 lg:col-span-4 flex flex-col gap-5">
+
+        <!-- Outcome scoreboard — appears on appeal.done -->
+        <div class="card outcome-card" id="outcome-card" hidden>
+          <div class="outcome-head">✓ Denial overturned</div>
+          <div class="outcome-grid">
+            <div><span id="oc-recovered" class="oc-num">$0</span><span class="oc-lbl">recovered</span></div>
+            <div><span id="oc-ratio" class="oc-num">—</span><span class="oc-lbl">cheaper</span></div>
+            <div><span id="oc-agents" class="oc-num">0</span><span class="oc-lbl">agents</span></div>
+          </div>
+          <div class="outcome-foot" id="oc-foot">pending nurse signature</div>
+        </div>
 
         <!-- Intake spec card -->
         <div class="card">
