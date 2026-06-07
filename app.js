@@ -60,35 +60,51 @@
 
   function coreCenter() { return { x: W / 2, y: H / 2 }; }
 
+  const TIER_COLOR = { frontier: "#D8A23A", mid_reason: "#4F7CFF", local_fast: "#35B97E" };
+
   function fireParticle(agentId, tier) {
     const cell = state.cells[agentId];
     if (!cell) return;
     const from = coreCenter();
     const to = cell.center;
-    const frontier = tier === "frontier";
     particles.push({
-      x: from.x, y: from.y, fromX: from.x, fromY: from.y, toX: to.x, toY: to.y,
-      t: 0, speed: frontier ? 0.035 : 0.05,
-      color: frontier ? "#ff2d9b" : (tier === "mid_reason" ? "#5b8cff" : "#3ef2c4"),
-      size: frontier ? 4.2 : 2.6, glow: frontier ? 26 : 12,
+      fromX: from.x, fromY: from.y, toX: to.x, toY: to.y, x: from.x, y: from.y,
+      t: 0, speed: tier === "frontier" ? 0.045 : 0.06,
+      color: TIER_COLOR[tier] || TIER_COLOR.local_fast,
+      size: tier === "frontier" ? 3.2 : 2.4,
+    });
+  }
+
+  // Draw the swarm as a topology: thin connector lines from the PAVO core to
+  // each specialist cell. Active calls light their line with the accent.
+  function drawConnectors() {
+    const c = coreCenter();
+    ctx.lineWidth = 1;
+    Object.keys(state.cells).forEach((id) => {
+      const cell = state.cells[id];
+      if (!cell || !cell.center) return;
+      const active = cell.el && cell.el.classList.contains("active");
+      ctx.strokeStyle = active ? "rgba(79,124,255,0.22)" : "rgba(46,55,68,0.55)";
+      ctx.beginPath(); ctx.moveTo(c.x, c.y); ctx.lineTo(cell.center.x, cell.center.y); ctx.stroke();
     });
   }
 
   function tick() {
     ctx.clearRect(0, 0, W, H);
+    drawConnectors();
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
       p.t += p.speed;
       const e = p.t < 1 ? 1 - Math.pow(1 - p.t, 2) : 1; // ease-out
       p.x = p.fromX + (p.toX - p.fromX) * e;
       p.y = p.fromY + (p.toY - p.fromY) * e;
-      // trail
-      ctx.strokeStyle = p.color + "55"; ctx.lineWidth = p.size * 0.7;
+      // faint trailing segment along the connector
+      ctx.strokeStyle = p.color + "40"; ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.moveTo(p.fromX + (p.toX - p.fromX) * Math.max(0, e - 0.12), p.fromY + (p.toY - p.fromY) * Math.max(0, e - 0.12));
+      ctx.moveTo(p.fromX + (p.toX - p.fromX) * Math.max(0, e - 0.10), p.fromY + (p.toY - p.fromY) * Math.max(0, e - 0.10));
       ctx.lineTo(p.x, p.y); ctx.stroke();
-      // head
-      ctx.shadowColor = p.color; ctx.shadowBlur = p.glow;
+      // small head, minimal glow (no neon)
+      ctx.shadowColor = p.color; ctx.shadowBlur = 6;
       ctx.fillStyle = p.color; ctx.beginPath();
       ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
       ctx.shadowBlur = 0;
@@ -97,8 +113,9 @@
     requestAnimationFrame(tick);
   }
   function burst(p) {
-    ctx.save(); ctx.globalAlpha = 0.8; ctx.shadowColor = p.color; ctx.shadowBlur = p.glow;
-    ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.toX, p.toY, p.size * 1.8, 0, Math.PI * 2); ctx.fill();
+    // a quiet ring on arrival, not a flare
+    ctx.save(); ctx.globalAlpha = 0.5; ctx.strokeStyle = p.color; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(p.toX, p.toY, p.size * 2.2, 0, Math.PI * 2); ctx.stroke();
     ctx.restore();
   }
   requestAnimationFrame(tick);
@@ -185,8 +202,8 @@
       ["DOS", d.date_of_service], ["Specialists", (e.required_specialists || []).length],
       ["Filing deadline", e.sol_deadline],
     ];
-    els.spec.innerHTML = rows.filter(r => r[1] != null && r[1] !== "")
-      .map(([k, v, code]) => `<div class="spec-row"><span class="k">${k}</span><span class="v ${code ? "code" : ""}">${esc(String(v))}</span></div>`).join("");
+    els.spec.innerHTML = `<div class="kv">` + rows.filter(r => r[1] != null && r[1] !== "")
+      .map(([k, v, code]) => `<div class="kv-row"><span class="kv-k">${esc(k)}</span><span class="kv-v ${code ? "code" : ""}">${esc(String(v))}</span></div>`).join("") + `</div>`;
   }
 
   function renderCost(e) {
@@ -214,19 +231,20 @@
   function renderReconcile(e) {
     els.reconcileCard.hidden = false;
     els.reconcileBody.innerHTML =
-      `<div class="ctr-claim"><div class="ctr-label">Payer claim · turn ${e.rep_turn_id}</div><div class="q">"${esc(e.claim || "")}"</div></div>` +
-      `<div class="ctr-evi"><div class="ctr-label">Contradicted by record · turn ${e.evidence_turn_id}</div><div class="q">"${esc(e.evidence || "")}"</div></div>`;
+      `<div class="ctr-block claim"><div class="ctr-label">Payer claim · turn ${esc(String(e.rep_turn_id))}</div><div class="ctr-q">"${esc(e.claim || "")}"</div></div>` +
+      `<div class="ctr-block evi"><div class="ctr-label">Contradicted by record · turn ${esc(String(e.evidence_turn_id))}</div><div class="ctr-q">"${esc(e.evidence || "")}"</div></div>`;
   }
 
   function renderLetter(e) {
     els.letterCard.hidden = false;
     const url = e.pdf_url ? (API + e.pdf_url) : "";
+    const safeUrl = url ? esc(encodeURI(url)) : "";
     els.letterBody.innerHTML =
       `<div class="letter-meta">${esc(e.appeal_id || "")} · citations: ${esc((e.citations || []).join(", "))}</div>` +
-      `<div>Verbatim appeal letter drafted from the call record. Requires licensed appeals-nurse signature before filing.</div>` +
+      `<div class="letter-desc">Verbatim appeal letter drafted from the call record. Requires licensed appeals-nurse signature before filing.</div>` +
       `<div class="letter-actions">` +
-      (url ? `<a class="btn-link" href="${url}" target="_blank">Open PDF</a>` : "") +
-      `<button class="btn-sign" id="sign-btn">Nurse: sign &amp; file</button></div>`;
+      (safeUrl ? `<a class="btn-link" href="${safeUrl}" target="_blank" rel="noopener noreferrer">Open PDF</a>` : "") +
+      `<button class="btn-sign" id="sign-btn">Nurse — sign &amp; file</button></div>`;
     const sb = $("sign-btn");
     if (sb) sb.onclick = () => {
       sb.textContent = "✓ Signed & filed"; sb.classList.add("signed");
@@ -247,7 +265,7 @@
     let el = document.querySelector(`.sponsor[data-n="${name}"]`);
     if (!el) {
       el = document.createElement("div"); el.className = "sponsor"; el.dataset.n = name;
-      el.innerHTML = `<span class="sdot"></span><span>${SPONSOR_LABEL[name] || name}</span><span class="smode"></span>`;
+      el.innerHTML = `<span class="sdot"></span><span class="sname">${esc(SPONSOR_LABEL[name] || name)}</span><span class="smode"></span>`;
       els.sponsorRow.appendChild(el);
     }
     el.classList.remove("real", "sim"); el.classList.add(mode);
@@ -293,7 +311,7 @@
     renderCost({ pavo_total: 0, frontier_total: 0, ratio: 1, tier_counts: {} });
   }
   function toast(msg) { els.toast.textContent = msg; els.toast.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => els.toast.hidden = true, 3200); }
-  function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+  function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
   let ws;
   function connect() {
